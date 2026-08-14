@@ -1,0 +1,14 @@
+# GenerateTask.srv
+# Sample a new start/goal/initial-yaw task inside the current scene.
+# use_default_seed=true  → derive a deterministic task seed from the
+#                          scene seed (0 is NOT interpreted as default).
+# use_default_seed=false → use `seed` verbatim; the same scene seed +
+#                          task seed always reproduces the same task.
+bool use_default_seed
+uint64 seed
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

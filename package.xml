@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!-- ===================================================================
+  il_2d_multiscale_debug  —  standalone 2D hierarchical expert debugger
+
+  Fully self-contained ROS1 catkin package.  Does NOT depend on, and is
+  NOT referenced by, il_dataset / il_multiscale_dataset / Flightmare.
+  Pure 2D, deterministic, single-process debug harness for observing and
+  debugging the cooperation between a 5 Hz privileged macro expert and a
+  30 Hz local obstacle-avoidance expert.
+
+  Status:  CODE ONLY.  Not compiled, not run, not tested by the author.
+  ==================================================================== -->
+<package format="2">
+  <name>il_2d_multiscale_debug</name>
+  <version>0.1.0</version>
+  <description>
+    Deterministic 2D hierarchical expert debug harness.
+
+    Simulates a 5 Hz privileged macro expert (global truth ESDF, global
+    route generation, left/right side selection from visible evidence)
+    guiding a 30 Hz local expert (FOV ray-cast observation only, candidate
+    trajectory search) for a planar vehicle, with a fixed-step (1/30 s)
+    swept-collision simulator and a Qt5 Widgets interactive debug panel.
+
+    Information boundaries are enforced in the type system: the 30 Hz
+    planner receives ONLY (VehicleState2D, LocalObservation, LocalTarget)
+    and can never access the global ESDF, obstacle truth, or global paths.
+
+    This package produces NO training data; it is a pure 2D debugging and
+    visualization case.
+  </description>
+
+  <maintainer email="user@example.com">flightmare_ws user</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <!-- ROS message/service generation -->
+  <build_depend>message_generation</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>visualization_msgs</build_depend>
+
+  <!-- C++ -->
+  <build_depend>roscpp</build_depend>
+  <build_depend>qtbase5-dev</build_depend>
+  <build_depend>eigen</build_depend>
+  <build_export_depend>eigen</build_export_depend>
+
+  <!-- Runtime -->
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>eigen</exec_depend>
+  <exec_depend>rviz</exec_depend>
+
+  <export>
+  </export>
+</package>

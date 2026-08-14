@@ -1,0 +1,368 @@
+# ============================================================================
+#  il_2d_multiscale_debug — default configuration  v5
+#
+#  Loaded into the private namespace of BOTH nodes by
+#  launch/expert_debug.launch.  Parameter names here must match the keys
+#  read in src/debug_simulation_node.cpp and src/debug_panel_node.cpp.
+#
+#  Everything below is a parameter; there are no hard-coded magic values
+#  in the C++ code.
+# ============================================================================
+
+# ── Region / world ─────────────────────────────────────────────────────────
+region:
+  min_x: -20.0
+  max_x:  20.0
+  min_y: -20.0
+  max_y:  20.0
+
+# Signed ESDF grid resolution (m/cell).  Same resolution is used for the
+# global truth ESDF and for connectivity / A* checks.
+esdf_resolution: 0.1
+
+# Physical drone radius used by the swept-segment collision check (m).
+drone_radius: 0.15
+
+# ── Scene generation ────────────────────────────────────────────────────────
+scene_generation:
+  min_obstacles: 0
+  max_obstacles: 20
+  min_radius: 0.1
+  # Extended multi-scale range.  The 40 m x 40 m workspace still leaves
+  # enough boundary room for a 4 m cylinder while producing genuinely large
+  # macro-scale detours.
+  max_radius: 4.0
+  # "log_uniform" samples radius over the whole scale range (covers small /
+  # medium / large obstacles); "uniform" uses a plain linear distribution.
+  radius_distribution: "log_uniform"
+  safety_clearance: 0.5          # min distance drone center ↔ obstacle surface
+  passage_margin: 0.2            # extra surface gap between two obstacles
+  boundary_margin: 0.5           # min free lane width kept along the boundary
+  max_attempts_per_obstacle: 100 # rejection samples for a single obstacle
+  max_total_scene_attempts: 48   # whole-scene resamples before giving up
+
+# ── Connectivity / A* qualification ─────────────────────────────────────────
+connectivity:
+  neighbor: 8                    # 8-neighbourhood connected components
+  min_main_component_area_m2: 100.0   # main component must be at least this large
+
+# ── Task sampling ───────────────────────────────────────────────────────────
+task_sampling:
+  min_start_goal_distance: 10.0  # m
+  yaw_bias_min_deg: 20.0         # initial yaw bias magnitude range (deg)
+  yaw_bias_max_deg: 160.0
+  goal_tolerance: 0.4            # m
+  # 0 disables the wall-clock simulation timeout.  Collision, goal reached
+  # and task-invalid conditions remain terminal as before.
+  episode_timeout_s: 0.0
+  astar_confirm: true            # static A* re-confirmation of connectivity
+  max_sampling_attempts: 400     # bounded start/goal rejection-sampling budget
+  goal_snap_max_radius_cells: 80 # GUI goal click snap search radius (cells)  # ── Causal task qualification (both sides truly feasible) ─────────
+  # When the straight start→goal path is blocked by a major obstacle,
+  # LEFT and RIGHT constrained routes are pre-generated.  If
+  # require_both_sides is true (recommended), only tasks where BOTH
+  # homotopy branches are globally feasible are accepted; this keeps the
+  # runtime left/right decision observable without hitting
+  # TASK_INVALID_FOR_CAUSAL_RULE.  Clear / zero-obstacle tasks are
+  # always accepted.
+  require_both_sides_feasible: true
+  max_blocked_qual_attempts: 80  # budget for the expensive route checks
+# ── Local FOV observation ───────────────────────────────────────────────────
+observation:
+  fov_deg: 90.0
+  range_m: 6.0
+  resolution: 0.1
+  ray_angular_res_deg: 0.5
+  history_max_age_ticks: 120     # short-term local map memory (30 Hz ticks)
+
+# ── 30 Hz local expert ──────────────────────────────────────────────────────
+local_planner:
+  horizon_s: 2.5
+  dt: 0.1
+  speed_samples: [0.0, 0.3, 0.6, 1.2, 1.8, 2.5]  # body-forward INTENT candidates (m/s)
+  # Lateral sampling MUST be left/right symmetric.  In the documented
+  # body frame (+Y = left / CCW) positive ratio = LEFT, negative = RIGHT.
+  # v7: fine steps (0.05/0.15) so avoidance can start with a small lateral
+  # drift instead of jumping straight to a hard swerve.
+  lateral_ratio_samples: [-0.5, -0.3, -0.15, -0.05, 0.0, 0.05, 0.15, 0.3, 0.5]
+  # Sign-symmetric coarse avoidance turns + fine heading corrections.  v7
+  # adds ±0.15 rad/s so small steering corrections are available.
+  yaw_rate_samples: [-2.0, -1.0, -0.5, -0.25, -0.15, 0.0, 0.15, 0.25, 0.5, 1.0, 2.0]  # rad/s
+  max_speed: 3.0                # m/s
+  max_accel: 2.0                # m/s^2
+  max_yaw_rate: 2.0             # rad/s
+  max_yaw_accel: 4.0            # rad/s^2
+  min_clearance: 0.5            # HARD min SURFACE clearance (safety ONLY — never the avoidance trigger)
+  # Soft-clearance cost radius (m): observed OCCUPIED cells within this
+  # radius feed a CONTINUOUS clearance cost ramp (≈0 at this radius, ≈1 at
+  # min_clearance), giving the 30 Hz planner an early avoidance gradient
+  # instead of the old all-or-nothing 0.5 m gate.  Must be > min_clearance.
+  soft_clearance_radius_m: 2.0
+  # Extra clearance reserved for 0.1 m grid discretisation error in the
+  # macro-handoff dynamic envelope:
+  #   handoff_clearance = scene_safety_clearance (0.5)
+  #                     + macro_route_clearance_margin (0.1)
+  #                     + clearance_discretization_margin_m (0.05) ≈ 0.65 m
+  clearance_discretization_margin_m: 0.05
+  # Reaction time (s) of the speed-dependent dynamic envelope:
+  #   required_clearance = handoff_clearance
+  #                      + closing_speed * obstacle_reaction_time_s
+  #                      + closing_speed^2 / (2 * max_accel)
+  # Only the CLOSING component of the velocity counts (tangential /
+  # separating motion is never over-penalised).
+  obstacle_reaction_time_s: 0.20
+  # 30 Hz control period (s) used to build the reachable dynamic window:
+  # every raw YAML sample is projected to
+  #   current_body_velocity ± max_accel * control_period_s
+  # (and current_yaw_rate ± max_yaw_accel * control_period_s), then clamped
+  # to max_speed / max_yaw_rate, and de-duplicated deterministically.
+  # This keeps the OUTPUT command continuous across ticks (no more
+  # stop ↔ aggressive-lateral chatter in the expert labels).
+  control_period_s: 0.0333333333
+  # Candidate regression limit (m): small zero-progress / mildly
+  # regressing candidates are allowed into the set (prevents the hard
+  # min_progress gate from deleting every "stop" candidate), but
+  # candidates clearly moving AWAY from the LocalTarget are still rejected.
+  # min_progress_m below is retained for YAML compatibility / diagnostics.
+  max_allowed_regress_m: 0.05
+  # Deterministic stall / control-oscillation detector window (30 Hz
+  # ticks).  Fires when, inside ONE LocalTarget event, the net progress
+  # toward the target is below limit_cycle_net_progress_m AND either
+  # (A) real observed / dynamic-clearance blockage on at least
+  #     limit_cycle_min_blocked_ticks ticks, or
+  # (B) repeated "near-zero command → aggressive lateral → near-zero
+  #     command" patterns / lateral command sign reversals
+  #     (limit_cycle_lateral_flip_count).
+  # On firing the planner commands a safe brake and classifies the failure
+  # BLOCKED_BY_OBSERVED_OBSTACLE so the 0.4 s macro budget accumulates.
+  limit_cycle_window_ticks: 15
+  limit_cycle_net_progress_m: 0.10
+  limit_cycle_min_blocked_ticks: 8
+  limit_cycle_lateral_flip_count: 2
+  turn_enter_deg: 42.0          # enter TURN_TO_TARGET when |bearing| exceeds
+  turn_exit_deg: 8.0            # leave TURN_TO_TARGET when |bearing| below
+  # TURN_TO_TARGET also requires |state.yaw_rate| <= this before exiting, so
+  # a residual rotation cannot overshoot the target heading after exit.
+  turn_exit_max_yaw_rate: 0.15
+  turn_k: 2.5                   # yaw-rate proportional gain in turn mode
+  # Near-goal heading relaxation: within this distance of the target the
+  # TURN_TO_TARGET enter threshold is widened (below), so the vehicle
+  # decelerates and converges instead of re-spinning near the goal.
+  near_goal_heading_relax_distance: 1.0
+  near_goal_turn_enter_deg: 75.0
+  # Final-goal feedback mode.  v7: applied UNIFORMLY to every LocalTarget —
+  # the final goal, 5 Hz macro guide points and rolling target-network
+  # output — the 30 Hz planner never branches on the target source.  It
+  # commands velocity directly toward the current LocalTarget and reduces
+  # speed continuously to zero inside the inner half of goal_tolerance.
+  # The feedback rollout still has to pass current-FOV, known-FREE and
+  # observed-clearance checks; failure falls back to normal avoidance.
+  terminal_control_distance: 1.2  # m
+  terminal_speed_gain: 1.0        # (m/s)/m of remaining terminal distance
+  terminal_max_speed: 0.6         # m/s
+  terminal_max_yaw_rate: 0.5      # rad/s; command becomes zero in goal disk
+  # LEGACY: the hard per-candidate progress gate is superseded by
+  # max_allowed_regress_m (see above); kept for YAML compatibility and as
+  # the "near-zero progress" diagnostic definition.
+  min_progress_m: 0.05
+  # v5 progress-qualification thresholds.  A candidate counts as
+  # "progressing" (SAFE_PROGRESSING) only when ALL of the following hold
+  # (away from the goal):
+  #   * its EXECUTABLE OUTPUT speed >= min_progress_speed_mps (a stop never
+  #     qualifies — the one-period reachable first command from standstill
+  #     is ~max_accel*control_period_s ≈ 0.067 m/s, so keep this below that
+  #     to accept a normal accelerating command);
+  #   * its executable progress over the certified safe prefix >=
+  #     min_progress_epsilon_m toward the current LocalTarget.
+  min_progress_speed_mps: 0.03
+  min_progress_epsilon_m: 0.01
+  # A LocalTarget position jump larger than this (m) is a DISCONTINUITY:
+  # the 30 Hz planner resets its per-mission memory (command continuity +
+  # stall/oscillation window) and reports target_discontinuity_reset.  Small
+  # continuous moves (e.g. a rolling 5 Hz target network) never reset — a
+  # plain update_event change never clears continuity or the stall window.
+  target_discontinuity_reset_m: 1.5
+  # v7 nominal / desired clearance (m): path-quality reference ONLY, never
+  # the "when does avoidance start" trigger.  The hard gate is min_clearance
+  # (0.5); early avoidance is driven by the continuous obstacle-risk cost.
+  nominal_clearance_m: 0.65
+  # ── v7 continuous early-avoidance risk ────────────────────────────
+  # A normalized penalty added to every candidate's cost.  It becomes
+  # non-zero as soon as an observed obstacle lies ahead in the candidate's
+  # travel corridor — long before the hard clearance gate — so the planner
+  # eases off gradually (small decel / small lateral / small turn) instead
+  # of only reacting when the surface clearance drops below ~1 m.
+  # Half-width (m) of the local corridor (vehicle → LocalTarget) used to
+  # gate the risk; off-corridor, off-path obstacles get ~zero risk.
+  risk_corridor_half_width: 1.0
+  # Longitudinal distance horizon (m) over which the geometric distance
+  # factor ramps from ~0 (at the horizon) to 1 (at hard clearance).
+  risk_distance_horizon_m: 5.0
+  # TTC horizon (s): first predicted entry into the nominal-clearance shell;
+  # candidates that brake/divert before entering it have infinite TTC.
+  risk_ttc_horizon_s: 2.5
+  # Radius (m) around the predicted trajectory sweep within which an
+  # observed obstacle counts as "near the path" even when off-corridor.
+  risk_trajectory_radius_m: 1.0
+  # Risk value above which avoidance_active is reported.
+  avoidance_active_threshold: 0.10
+  brake_stop_margin_m: 0.3      # extra margin added to stopping distance
+  # Minimum EXECUTABLE SAFE-PREFIX duration (s) for a candidate: the
+  # trajectory is accepted (and truncated to) its prefix that stays inside
+  # the current FOV and known-FREE space.  Must be >= dt (0.1).  This lets
+  # a candidate whose 2.5 s prediction end swings outside the current FOV
+  # still be executed for its safe prefix instead of being rejected whole.
+  min_executable_prefix_s: 0.2
+  # Common comparison horizon.  Shorter safe prefixes remain executable but
+  # receive a proportional progress-cost penalty, preventing 0.2 s lateral
+  # snippets from exploiting zero/underdeveloped jerk and alignment costs.
+  scoring_horizon_s: 0.8
+  # Best-candidate tie tolerance: candidates within this cost difference are
+  # tied and ranked deterministically (heading error, cross-track, |vy|,
+  # |yaw_rate|, control change, stable index) — never by enumeration order.
+  cost_tie_tolerance: 0.000001
+  # Normalization scale (m) for the cross-track cost term.
+  cross_track_normalize_m: 2.0
+  # Target-alignment cost weights (all terms normalised to ~[0,1]):
+  #   progress            = 1 - (dist_current - dist_prefix_end)/max(1,dist)
+  #                         + missing scoring-horizon fraction
+  #   clearance (SOFT)    = 0 when no OCCUPIED cell found inside the search
+  #                         radius, else
+  #                         clamp((soft_clearance_radius_m - min_clear) /
+  #                               max(eps, soft_clearance_radius_m
+  #                                           - min_clearance), 0, 1)
+  #                         ≈0 at 2.0 m, continuous, ≈1 at 0.5 m (the old
+  #                         formula 1 - cl/min_clearance was 0 for every
+  #                         feasible candidate and gave no avoidance
+  #                         gradient).
+  #   smoothness          = mean |delta acceleration| / (2*max_accel)
+  #   speed_change        = mean vector mismatch to measured body velocity
+  #                         and previous command / max_speed
+  #   yaw_rate_change     = |cmd - current_yaw_rate|/max_yaw_rate
+  #                         + mean(|yaw_acceleration|)/max_yaw_accel (clamped)
+  #   terminal_heading    = |wrap(target_dir_end - yaw_end)| / pi
+  #   velocity_alignment  = |wrap(target_dir - vel_dir_end)| / pi
+  #                         (low-speed falls back to heading)
+  #   cross_track         = mean lateral offset / cross_track_normalize_m
+  cost_weights:
+    progress: 1.0
+    clearance: 2.0
+    smoothness: 0.5
+    speed_change: 0.3
+    yaw_rate_change: 0.3
+    terminal_heading: 1.5
+    velocity_alignment: 1.2
+    cross_track: 1.0
+    obstacle_risk: 3.0        # v7 continuous early-avoidance risk weight
+
+# ── 5 Hz privileged macro expert ────────────────────────────────────────────
+macro:
+  local_failure_duration_s: 0.4 # consecutive 30 Hz blockage failures before macro
+  # Nominal arc-length lookahead. The 5 Hz expert clips this to the farthest
+  # route point whose straight chord from the vehicle still satisfies the
+  # macro/local handoff clearance, so a guide is not placed behind a blocker.
+  route_lookahead_min: 2.5
+  route_lookahead_max: 4.0
+  # ── v7 rolling guide point ─────────────────────────────────────────
+  # Minimum distance (m) from the vehicle to a macro guide point.  The 5 Hz
+  # expert never hands the 30 Hz planner a foot-level target (0.2-0.3 m);
+  # the guide is advanced along the route until at least this far ahead.
+  guide_min_distance_m: 1.5
+  # Adaptive lookahead: the base arc lookahead grows by speed*time_gap (s)
+  # up to route_lookahead_max and shrinks toward route_lookahead_min on
+  # curved route sections.
+  guide_lookahead_time_gap_s: 1.0
+  # World-space hysteresis (m): a healthy new guide within this distance of
+  # the previous one is held, so a rolling route never jitters the 5 Hz
+  # target left/right.
+  guide_hysteresis_m: 0.3
+  # FOV margin (deg) used when clamping the guide into the local FOV.
+  guide_fov_margin_deg: 10.0
+  # Translational displacement (m) per 5 Hz interval below which the FSM
+  # counts a macro no-progress sample.
+  no_progress_threshold_m: 0.05
+  # No-progress duration (s) after which the guide hysteresis is dropped
+  # and the guide is re-advanced / the route refreshed.
+  no_progress_duration_threshold_s: 1.0
+  side_evidence_margin: 0.5     # avg visible free-range score margin (m) for side pick
+  evidence_ray_step_deg: 1.0
+  min_evidence_ray_pairs: 4     # fewer valid symmetric left/right ray pairs → ambiguous
+  # Effective local-target events use the VALUE-CHANGE rule: an event is
+  # issued only when the delivered target moved more than this tolerance.
+  local_target_event_tolerance_m: 0.05
+  exit_fov_margin_deg: 10.0     # goal must be within fov/2 - margin to exit macro
+  corridor_half_width: 1.5      # half width of swept corridor used for blocker ID
+  corridor_rear_tolerance_m: 0.5
+  blocking_lateral_span_ratio: 0.5
+  blocker_clear_dist_m: 1.0     # how far past the blocker before it counts as passed
+  # Max lateral distance (m) from the FIXED macro-entry reference route
+  # for a vehicle projection to be trusted in the blocker-passed check;
+  # beyond this the monotonic progress is held (no false jump to the end).
+  # CONSERVATIVE default matching the local route corridor width
+  # (corridor_half_width 1.5 + margins) — do NOT use 5.0.
+  blocker_projection_max_dist_m: 2.0
+  # Fixed-route progress tracking: extra forward tolerance beyond
+  # max_speed * (5 Hz interval) and the backward arc-length window (m)
+  # allowed when the vehicle stops.
+  progress_forward_tolerance_m: 0.5
+  progress_back_window_m: 1.0
+  # Blocker association: min supporting visible cells for a confident
+  # MATCHED, the ratio below which a second-best cylinder makes the match
+  # AMBIGUOUS, and the max cell-to-cylinder surface/inside residual (m).
+  blocker_match_min_cells: 3
+  blocker_match_ambiguity_ratio: 0.5
+  blocker_match_surface_tol_m: 0.3
+  macro_exit_stable_ticks: 3    # consecutive 5 Hz ticks satisfying exit condition
+  # Re-entry hysteresis guard, measured in 30 Hz TICKS (decremented once
+  # per 30 Hz tick, so 30 ticks ≈ 1 s).  It is NOT a 5 Hz count.
+  macro_reentry_guard_ticks: 30
+  route_clearance_margin: 0.1   # extra inflation used for privileged routes
+  # Start-clearance recovery radius (m): when the macro A* start cell falls
+  # short of the route clearance (0.1 m discretisation error) while the
+  # continuous start is still above scene_safety_clearance, the nearest
+  # route-clear cell within this bounded radius is used and a short
+  # recovery connection (satisfying ONLY scene_safety_clearance) is
+  # prepended.  Never silently switches LEFT/RIGHT; never skips the start
+  # clearance check; bounded radius / node count by construction.
+  start_recovery_max_radius_m: 0.5
+  # Consecutive NO_SAFE_CANDIDATE (UNKNOWN-driven, NOT observed blockage)
+  # 30 Hz ticks after which the LOCAL_UNKNOWN_RECOVERY diagnostic becomes
+  # active.  NO_SAFE_CANDIDATE never triggers the 5 Hz macro expert and
+  # never counts as real blockage.
+  unknown_recovery_threshold_ticks: 60
+  route_side_bias: 0.4          # accumulated A* penalty on the wrong fixed side
+  homotopy_side_tolerance_m: 0.05
+  gateway_projection_radius_m: 0.8
+
+vehicle:
+  goal_stop_speed_mps: 0.2
+  stationary_speed_mps: 0.05
+
+# ── GUI ─────────────────────────────────────────────────────────────────────
+gui:
+  refresh_rate_hz: 30.0
+  default_speed: 1.0
+  speeds: [0.1, 0.25, 0.5, 1.0, 2.0]
+  show_esdf: true
+  show_truth_paths: true
+  show_local_observation: true
+  show_rejected_candidates: true
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+# Dedicated flight-log output directory (used by /export_flight_log when the
+# request's output_directory is empty, AND by the startup cleanup).
+logging:
+  output_directory: "~/.ros/il_2d_multiscale_debug_logs"
+  # Delete old "flight_log_*.csv" files in the FIRST level of
+  # output_directory every time debug_simulation_node starts (safe,
+  # non-recursive, never touches directories/symlinks/other files, never
+  # clears HOME/root/workspace).  The GUI node never cleans.
+  clear_on_start: true
+  filename_prefix: "flight_log_"
+
+# ── Miscellaneous ───────────────────────────────────────────────────────────
+# Seed 0 is a LEGAL seed.  Launch passes `seed` as a string (type="str")
+# so values above 2^31 are supported; the node parses it with
+# readUint64Param.  Services use an explicit `use_default_seed` flag
+# instead of interpreting 0 as "default".
+default_seed: 42

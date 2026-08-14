@@ -1,0 +1,125 @@
+# ===================================================================
+#  expert_debug.rviz  — RViz configuration for il_2d_multiscale_debug
+#
+#  Fixed frame: "world".  Privileged truth is shown in distinctly
+#  different colors and ONLY on the separate *_privileged / truth_*
+#  topics — never fed to the 30 Hz planner.
+# ===================================================================
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz/Grid
+      Name: Grid
+      Enabled: true
+      Plane Cell Count: 80
+      Cell Size: 1
+      Line Style: Lines
+      Color: 160; 160; 164
+      Value: true
+
+    - Class: rviz/Map
+      Name: TruthESDF (privileged)
+      Enabled: true
+      Topic: /truth_esdf
+      Color Scheme: map
+      Draw Behind: false
+      Value: true
+
+    - Class: rviz/Map
+      Name: SelectableMask (privileged)
+      Enabled: false
+      Topic: /selectable_mask
+      Color Scheme: map
+      Draw Behind: true
+      Value: false
+
+    - Class: rviz/Map
+      Name: LocalObservation
+      Enabled: true
+      Topic: /local_observation
+      Color Scheme: map
+      Draw Behind: true
+      Value: true
+
+    - Class: rviz/Path
+      Name: ExecutedPath
+      Enabled: true
+      Topic: /executed_path
+      Color: 0; 255; 255
+      Line Style: Lines
+      Value: true
+
+    - Class: rviz/Path
+      Name: LocalPlan
+      Enabled: true
+      Topic: /local_plan
+      Color: 0; 120; 255
+      Line Style: Lines
+      Value: true
+
+    - Class: rviz/Path
+      Name: LeftPrivilegedRoute (PRIVILEGED/TRUTH)
+      Enabled: true
+      Topic: /left_privileged_path
+      Color: 0; 220; 0
+      Line Style: Lines
+      Value: true
+
+    - Class: rviz/Path
+      Name: RightPrivilegedRoute (PRIVILEGED/TRUTH)
+      Enabled: true
+      Topic: /right_privileged_path
+      Color: 220; 0; 0
+      Line Style: Lines
+      Value: true
+
+    - Class: rviz/Path
+      Name: LockedRoute
+      Enabled: true
+      Topic: /locked_route
+      Color: 255; 200; 0
+      Line Style: Lines
+      Value: true
+
+    - Class: rviz/MarkerArray
+      Name: DebugMarkers
+      Enabled: true
+      Topic: /debug_markers
+      Value: true
+
+    - Class: rviz/MarkerArray
+      Name: SceneObstacles (TRUTH)
+      Enabled: true
+      Topic: /scene_obstacles
+      Value: true
+
+    - Class: rviz/MarkerArray
+      Name: RejectedCandidates
+      Enabled: true
+      Topic: /rejected_candidates
+      Value: true
+
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: world
+    Frame Rate: 30
+
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/Measure
+
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 55
+      Focal Point: [0, 0, 0]
+      Pitch: 1.57
+      Yaw: 0.0

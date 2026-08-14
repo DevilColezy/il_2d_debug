@@ -1,0 +1,14 @@
+# StepSimulation.srv
+# Deterministically advance the simulation while it is paused.
+#
+#  * steps > 0, step_to_next_5hz = false  → advance exactly `steps` 30 Hz ticks.
+#  * step_to_next_5hz = true              → advance to (and complete) the next
+#                                           5 Hz macro-expert boundary, then stop.
+uint32 steps
+bool step_to_next_5hz
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

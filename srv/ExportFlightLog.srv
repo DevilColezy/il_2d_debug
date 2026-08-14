@@ -1,0 +1,10 @@
+# Export the complete in-memory log of the current task run.
+# Leave output_directory empty to use ~/.ros/il_2d_multiscale_debug_logs.
+string output_directory
+---
+bool success
+string reason
+string path
+uint64 row_count
+uint64 scene_id
+uint64 task_id

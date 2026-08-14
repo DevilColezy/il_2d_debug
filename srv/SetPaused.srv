@@ -1,0 +1,11 @@
+# SetPaused.srv
+# Pause / resume the deterministic simulation.
+# While paused the 30 Hz wall timer does nothing; simulation only advances
+# through StepSimulation calls.
+bool paused
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

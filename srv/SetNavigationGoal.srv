@@ -1,0 +1,11 @@
+# SetNavigationGoal.srv
+# Change the final navigation goal (e.g. from a GUI click).
+# The requested point is projected onto the nearest legal selectable cell
+# (ESDF >= safety_clearance, inside the main connected component).
+float64[2] goal
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

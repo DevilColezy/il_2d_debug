@@ -1,0 +1,12 @@
+# GenerateScene.srv
+# Generate a brand-new deterministic scene (new obstacles + new task).
+# use_default_seed=true  → ignore `seed`, use the launch `seed` param.
+# use_default_seed=false → use `seed` verbatim (0 is a legal seed).
+bool use_default_seed
+uint64 seed
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

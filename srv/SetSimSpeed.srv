@@ -1,0 +1,11 @@
+# SetSimSpeed.srv
+# Real-time pacing of the "Run" mode.  The logical simulation always steps
+# at exactly 30 Hz ticks; the speed factor only scales the wall-clock
+# period of the driver timer (0.5 = half speed, 2.0 = double speed).
+float64 speed
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

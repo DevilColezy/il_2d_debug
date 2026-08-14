@@ -1,0 +1,16 @@
+# ResetTask.srv
+# Restart the CURRENT, IDENTICAL task: same scene, start, goal,
+# initial_yaw and task_id.  Clears tick, vehicle state, local observation
+# history, executed path and FSM.  task_counter is NOT incremented.
+#
+# `seed` and `use_default_seed` are retained for interface compatibility
+# and are NOT used by Reset — sample a new start/goal/yaw with
+# GenerateTask instead.
+bool use_default_seed
+uint64 seed
+---
+bool success
+string reason
+uint64 tick
+uint64 scene_id
+uint64 task_id

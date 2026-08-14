@@ -1,0 +1,60 @@
+<?xml version="1.0"?>
+<!-- ===================================================================
+  il_2d_multiscale_debug — single entry point
+
+    roslaunch il_2d_multiscale_debug expert_debug.launch \
+        seed:=42 paused:=true use_rviz:=true config_file:=... show_truth:=true
+
+  Launches:
+    debug_simulation_node   (C++) — deterministic 2D sim, planning core, topics/services
+    debug_panel_node        (C++ Qt5) — interactive debug GUI
+    rviz                    (optional) — pre-configured 3D viewer for the topics
+
+  STATUS: code only.  Not compiled, not run, not tested by the author.
+  ==================================================================== -->
+<launch>
+  <arg name="seed"        default="42"/>
+  <arg name="paused"      default="true"/>
+  <arg name="use_rviz"    default="true"/>
+  <arg name="config_file" default="$(find il_2d_multiscale_debug)/config/default.yaml"/>
+  <arg name="show_truth"  default="true"/>
+
+  <param name="use_sim_time" value="false"/>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       Simulation node: owns the core, the 30 Hz driver timer, topics
+       and services.  The config YAML is loaded into its private
+       namespace so C++ reads identical key names.
+       ═══════════════════════════════════════════════════════════════ -->
+  <node name="debug_simulation_node" pkg="il_2d_multiscale_debug"
+        type="debug_simulation_node" output="screen">
+    <rosparam command="load" file="$(arg config_file)"/>
+    <!-- seed is passed as a STRING so values above 2^31 are legal; the
+         node parses it with readUint64Param (seed 0 is a valid seed). -->
+    <param name="seed" value="$(arg seed)" type="str"/>
+    <param name="paused"     value="$(arg paused)"/>
+    <param name="show_truth" value="$(arg show_truth)"/>
+  </node>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       Debug panel node: Qt5 Widgets GUI.  Talks to the simulation node
+       ONLY through ROS topics and services (no bare core pointer).
+       ═══════════════════════════════════════════════════════════════ -->
+  <node name="debug_panel_node" pkg="il_2d_multiscale_debug"
+        type="debug_panel_node" output="screen">
+    <rosparam command="load" file="$(arg config_file)"/>
+    <param name="paused" value="$(arg paused)"/>
+    <!-- Keep the GUI truth controls consistent with the simulation
+         publisher's launch-level information boundary. -->
+    <param name="gui/show_truth_paths" value="$(arg show_truth)"/>
+    <param name="gui/show_esdf" value="$(arg show_truth)"/>
+  </node>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       Optional RViz
+       ═══════════════════════════════════════════════════════════════ -->
+  <group if="$(arg use_rviz)">
+    <node name="rviz" pkg="rviz" type="rviz"
+          args="-d $(find il_2d_multiscale_debug)/rviz/expert_debug.rviz"/>
+  </group>
+</launch>
