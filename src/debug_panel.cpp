@@ -361,6 +361,37 @@ void DebugCanvas::paintEvent(QPaintEvent*) {
                                tip.y() - hl * std::sin(ang + 0.5));
                     p.drawPolygon(QPolygonF({tip, a1, a2}));
                 }
+            } else if (mk.ns == "original_goal" &&
+                       mk.type == visualization_msgs::Marker::SPHERE) {
+                // v9 ORIGINAL goal (the goal the 5 Hz corrector judges
+                // against) — white ring, distinct from the task marker.
+                const double r = mk.scale.x / 2.0 * scale_;
+                p.setBrush(Qt::NoBrush);
+                p.setPen(QPen(QColor(255, 255, 255), 2, Qt::DashLine));
+                p.drawEllipse(c, r, r);
+            } else if (mk.ns == "view_rotation" &&
+                       mk.type == visualization_msgs::Marker::ARROW) {
+                // v9 TURN_LEFT/RIGHT view-rotation ray — a VIEW-ROTATION
+                // ONLY virtual ray, drawn dashed so it is never mistaken
+                // for a certified safe waypoint.
+                if (mk.points.size() >= 2) {
+                    const QPointF start =
+                        worldToPixel(mk.points[0].x, mk.points[0].y);
+                    const QPointF tip =
+                        worldToPixel(mk.points[1].x, mk.points[1].y);
+                    QPen pen(QColor(255, 90, 230), 2.5, Qt::DashLine);
+                    p.setPen(pen);
+                    p.setBrush(QColor(255, 90, 230));
+                    QLineF line(start, tip);
+                    p.drawLine(line);
+                    const double ang = std::atan2(line.dy(), line.dx());
+                    const double hl = std::min(8.0, line.length() * 0.3);
+                    QPointF a1(tip.x() - hl * std::cos(ang - 0.5),
+                               tip.y() - hl * std::sin(ang - 0.5));
+                    QPointF a2(tip.x() - hl * std::cos(ang + 0.5),
+                               tip.y() - hl * std::sin(ang + 0.5));
+                    p.drawPolygon(QPolygonF({tip, a1, a2}));
+                }
             } else if (mk.type == visualization_msgs::Marker::TEXT_VIEW_FACING) {
                 QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont);
                 f.setPixelSize(std::max(9, static_cast<int>(mk.scale.z * 9.0)));
@@ -709,8 +740,9 @@ void DebugPanel::refreshStatus() {
     txt += QString("local target updated this tick = %1   macro tick ran = %2\n")
                .arg(s.local_target_updated_this_tick ? "yes" : "no")
                .arg(s.macro_tick_ran_this_tick ? "yes" : "no");
-    txt += QString("macro active = %1   selected side = %2\n")
+    txt += QString("macro active (legacy) = %1   correction active = %2   side = %3\n")
                .arg(s.macro_active ? "YES" : "no")
+               .arg(s.target_correction_active ? "YES" : "no")
                .arg(sideName(static_cast<SideSelection>(s.side)));
     txt += QString("side reason = %1\n").arg(QString::fromStdString(s.side_reason));
     txt += QString("side avg free range (L/R) = %1 / %2 m\n")
@@ -835,21 +867,75 @@ void DebugPanel::refreshStatus() {
     txt += QString("dynamic window candidates = %1   start clearance recovery = %2\n")
                .arg(s.dynamic_window_candidate_count)
                .arg(s.start_clearance_recovery_used ? "YES" : "no");
-    txt += QString("blocker id = %1   association = %2\n")
-               .arg(s.blocker_id)
-               .arg(QString::fromStdString(blockerAssociationName(
-                   static_cast<BlockerAssociation>(s.blocker_association))));
-    txt += QString("blocker_passed_latched = %1\n")
+    // ── v8: LOCAL blocker track + guide certification diagnostics ──
+    txt += QString("local blocker track valid = %1   track id = %2\n")
+               .arg(s.local_blocker_track_valid ? "YES" : "no")
+               .arg(s.blocker_id);
+    txt += QString("association = NONE (local-only; no privileged match)\n");
+    txt += QString("local blocker behind = %1   goal corridor clear = %2\n")
+               .arg(s.local_blocker_behind ? "YES" : "no")
+               .arg(s.local_goal_corridor_clear ? "YES" : "no");
+    txt += QString("local leave progress = %1 m   local route valid = %2\n")
+               .arg(s.local_leave_progress_m, 0, 'f', 2)
+               .arg(s.local_macro_route_valid ? "YES" : "no");
+    txt += QString("guide in FOV = %1   endpoint known-FREE = %2   chord known-FREE = %3\n")
+               .arg(s.macro_guide_inside_current_fov ? "YES" : "no")
+               .arg(s.macro_guide_endpoint_known_free ? "YES" : "no")
+               .arg(s.macro_guide_chord_known_free ? "YES" : "no");
+    {
+        // Min observed clearance along the guide chord (n/a when no guide).
+        const double cl = s.macro_guide_min_observed_clearance;
+        const QString cltxt =
+            std::isinf(cl) ? QString("n/a") : QString::number(cl, 'f', 3);
+        txt += QString("guide min observed clearance = %1 m\n")
+                   .arg(cltxt);
+    }
+    txt += QString("guide body-frame (x, y) = (%1, %2) m   bearing = %3 deg   dist = %4 m\n")
+               .arg(s.relative_target_x_body, 0, 'f', 2)
+               .arg(s.relative_target_y_body, 0, 'f', 2)
+               .arg(s.target_bearing_deg, 0, 'f', 1)
+               .arg(s.target_distance_m, 0, 'f', 2);
+    // ── v9: 5 Hz visibility target corrector + target encoding ────
+    txt += QString("\n── v9 5Hz TARGET CORRECTOR ──\n");
+    txt += QString("directive = %1   correction active = %2\n")
+               .arg(QString::fromStdString(s.target_correction_type_name))
+               .arg(s.target_correction_active ? "YES" : "no");
+    txt += QString("latch side = %1   token = %2\n")
+               .arg(sideName(static_cast<SideSelection>(s.side)))
+               .arg(s.target_direction_token);
+    txt += QString("executed body dir = (%1, %2)   normalized dist = %3\n")
+               .arg(s.target_direction_x_body, 0, 'f', 3)
+               .arg(s.target_direction_y_body, 0, 'f', 3)
+               .arg(s.target_distance_normalized, 0, 'f', 4);
+    txt += QString("effective target = (%1, %2) m   valid = %3\n")
+               .arg(s.effective_target_x, 0, 'f', 2)
+               .arg(s.effective_target_y, 0, 'f', 2)
+               .arg(s.effective_target_world_valid ? "yes" : "NO");
+    txt += QString("original goal = (%1, %2) m\n")
+               .arg(s.original_goal[0], 0, 'f', 2)
+               .arg(s.original_goal[1], 0, 'f', 2);
+    txt += QString("obs: goal_in_fov=%1  corridor_blocked=%2  blocker=%3\n")
+               .arg(s.observability_goal_inside_fov ? "Y" : "n")
+               .arg(s.observability_direct_corridor_blocked ? "Y" : "n")
+               .arg(s.observability_blocker_observed ? "Y" : "n");
+    txt += QString("obs: LEFT bypass=%1  RIGHT bypass=%2  local_avoidable=%3\n")
+               .arg(s.observability_left_bypass_visible ? "Y" : "n")
+               .arg(s.observability_right_bypass_visible ? "Y" : "n")
+               .arg(s.observability_local_avoidance_observable ? "Y" : "n");
+    txt += QString("obs: fov_truncated=%1  unknown_occluded=%2\n")
+               .arg(s.observability_fov_boundary_truncated ? "Y" : "n")
+               .arg(s.observability_unknown_occluded ? "Y" : "n");
+    txt += QString("obs reason = %1\n")
+               .arg(QString::fromStdString(s.observability_reason));
+    txt += QString("left/right frontier scores = %1 / %2 m\n")
+               .arg(s.observability_left_score, 0, 'f', 2)
+               .arg(s.observability_right_score, 0, 'f', 2);
+    txt += QString("events: enter=%1  exit=%2  update=%3\n")
+               .arg(s.correction_enter_event)
+               .arg(s.correction_exit_event)
+               .arg(s.correction_update_event);
+    txt += QString("blocker_passed_latched (local) = %1\n")
                .arg(s.blocker_passed_latched ? "YES" : "no");
-    txt += QString("fixed-route progress = %1 m   blocker progress = %2 m\n")
-               .arg(s.entry_vehicle_progress, 0, 'f', 2)
-               .arg(s.entry_blocker_progress, 0, 'f', 2);
-    txt += QString("projection dist = %1 m   segment = %2\n")
-               .arg(s.entry_projection_dist, 0, 'f', 2)
-               .arg(s.entry_segment_index);
-    txt += QString("progress delta = %1 m   max/tick = %2 m\n")
-               .arg(s.entry_progress_delta, 0, 'f', 2)
-               .arg(s.entry_progress_max_delta, 0, 'f', 2);
     txt += QString("macro stable-exit count = %1\n")
                .arg(s.macro_stable_exit_count);
     txt += QString("pending goal set = %1   revision = %2   pos = (%3, %4)\n")
@@ -872,6 +958,8 @@ void DebugPanel::refreshStatus() {
                .arg(s.used_global_path_by_local_planner ? "TRUE (LEAK!)" : "false");
     txt += QString("macro_used_privileged_esdf = %1\n")
                .arg(s.macro_used_privileged_esdf ? "true" : "false");
+    txt += QString("macro_used_local_history_only = %1\n")
+               .arg(s.macro_used_local_history_only ? "true" : "false");
     txt += QString("side_selected_from_visible_evidence = %1\n")
                .arg(s.side_selected_from_visible_evidence ? "true" : "false");
     txt += QString("side_selected_using_CURRENT_PATCH = %1\n")

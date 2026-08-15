@@ -80,6 +80,10 @@ public:
         pub_selectable_ = nh_.advertise<nav_msgs::OccupancyGrid>("selectable_mask", 1, true);
         pub_local_plan_ = nh_.advertise<nav_msgs::Path>("local_plan", 2);
         pub_executed_ = nh_.advertise<nav_msgs::Path>("executed_path", 2);
+        // v8: these legacy topic names are kept ONLY for backwards
+        // compatibility.  The content is now LOCAL candidate routes (left /
+        // right certified candidates + the locked local known-free route),
+        // never privileged global routes.
         pub_left_ = nh_.advertise<nav_msgs::Path>("left_privileged_path", 1, true);
         pub_right_ = nh_.advertise<nav_msgs::Path>("right_privileged_path", 1, true);
         pub_locked_ = nh_.advertise<nav_msgs::Path>("locked_route", 1, true);
@@ -439,7 +443,7 @@ private:
 
         const Scene2D& scene = sim_.scene();
         const Task2D& task = sim_.task();
-        out << "# format,il_2d_multiscale_debug_flight_log_v7\n";
+        out << "# format,il_2d_multiscale_debug_flight_log_v9\n";
         out << "# scene_id," << scene.scene_id << "\n";
         out << "# task_id," << task.task_id << "\n";
         out << "# scene_seed," << scene.seed << "\n";
@@ -521,7 +525,30 @@ private:
                "time_to_collision,obstacle_risk_cost,avoidance_strength,"
                "avoidance_active,local_target_distance,"
                "macro_route_progress,macro_guide_lookahead,"
-               "macro_guide_update_reason,macro_no_progress_duration\n";
+               "macro_guide_update_reason,macro_no_progress_duration,"
+               // ── v8: local-causal macro expert ───────────────────
+               "macro_used_local_history_only,macro_guide_inside_current_fov,"
+               "macro_guide_endpoint_known_free,macro_guide_chord_known_free,"
+               "macro_guide_min_observed_clearance,local_blocker_track_valid,"
+               "local_blocker_behind,local_goal_corridor_clear,"
+               "local_leave_progress_m,local_macro_route_valid,"
+               "relative_target_x_body,relative_target_y_body,"
+               "target_bearing_deg,target_distance_m,"
+               // ── v9: 5Hz target correction + observability + encoding ──
+               "target_correction_type,target_correction_type_name,"
+               "target_correction_active,target_direction_token,"
+               "target_direction_x_body,target_direction_y_body,"
+               "target_distance_normalized,effective_target_x,effective_target_y,"
+               "effective_target_world_valid,original_goal_x,original_goal_y,"
+               "observability_goal_inside_fov,observability_direct_corridor_blocked,"
+               "observability_blocker_observed,observability_left_bypass_visible,"
+               "observability_right_bypass_visible,"
+               "observability_local_avoidance_observable,"
+               "observability_fov_boundary_truncated,"
+               "observability_unknown_occluded,observability_reason,"
+               "observability_left_score,observability_right_score,"
+               "correction_enter_event,correction_exit_event,"
+               "correction_update_event\n";
 
         for (const FlightLogSample& row : rows) {
             const SimSnapshot& s = row.snapshot;
@@ -627,7 +654,49 @@ private:
                 << s.macro_route_progress << ','
                 << s.macro_guide_lookahead << ','
                 << csvString(s.macro_guide_update_reason) << ','
-                << s.macro_no_progress_duration << '\n';
+                << s.macro_no_progress_duration << ','
+                // ── v8: local-causal macro expert ─────────────────
+                << s.macro_used_local_history_only << ','
+                << s.macro_guide_inside_current_fov << ','
+                << s.macro_guide_endpoint_known_free << ','
+                << s.macro_guide_chord_known_free << ','
+                << s.macro_guide_min_observed_clearance << ','
+                << s.local_blocker_track_valid << ','
+                << s.local_blocker_behind << ','
+                << s.local_goal_corridor_clear << ','
+                << s.local_leave_progress_m << ','
+                << s.local_macro_route_valid << ','
+                << s.relative_target_x_body << ','
+                << s.relative_target_y_body << ','
+                << s.target_bearing_deg << ','
+                << s.target_distance_m << ','
+                // ── v9: 5Hz target correction + observability + encoding ──
+                << static_cast<int>(s.target_correction_type) << ','
+                << csvString(s.target_correction_type_name) << ','
+                << s.target_correction_active << ','
+                << s.target_direction_token << ','
+                << s.target_direction_x_body << ','
+                << s.target_direction_y_body << ','
+                << s.target_distance_normalized << ','
+                << s.effective_target_x << ','
+                << s.effective_target_y << ','
+                << s.effective_target_world_valid << ','
+                << s.original_goal.x() << ','
+                << s.original_goal.y() << ','
+                << s.observability_goal_inside_fov << ','
+                << s.observability_direct_corridor_blocked << ','
+                << s.observability_blocker_observed << ','
+                << s.observability_left_bypass_visible << ','
+                << s.observability_right_bypass_visible << ','
+                << s.observability_local_avoidance_observable << ','
+                << s.observability_fov_boundary_truncated << ','
+                << s.observability_unknown_occluded << ','
+                << csvString(s.observability_reason) << ','
+                << s.observability_left_score << ','
+                << s.observability_right_score << ','
+                << s.correction_enter_event << ','
+                << s.correction_exit_event << ','
+                << s.correction_update_event << '\n';
         }
         out.close();
         if (!out) {
@@ -774,6 +843,54 @@ private:
         m.macro_guide_lookahead = s.macro_guide_lookahead;
         m.macro_guide_update_reason = s.macro_guide_update_reason;
         m.macro_no_progress_duration = s.macro_no_progress_duration;
+        // Local-causal macro diagnostics (v8).
+        m.macro_used_local_history_only = s.macro_used_local_history_only;
+        m.macro_guide_inside_current_fov = s.macro_guide_inside_current_fov;
+        m.macro_guide_endpoint_known_free = s.macro_guide_endpoint_known_free;
+        m.macro_guide_chord_known_free = s.macro_guide_chord_known_free;
+        m.macro_guide_min_observed_clearance =
+            s.macro_guide_min_observed_clearance;
+        m.local_blocker_track_valid = s.local_blocker_track_valid;
+        m.local_blocker_behind = s.local_blocker_behind;
+        m.local_goal_corridor_clear = s.local_goal_corridor_clear;
+        m.local_leave_progress_m = s.local_leave_progress_m;
+        m.local_macro_route_valid = s.local_macro_route_valid;
+        m.relative_target_x_body = s.relative_target_x_body;
+        m.relative_target_y_body = s.relative_target_y_body;
+        m.target_bearing_deg = s.target_bearing_deg;
+        m.target_distance_m = s.target_distance_m;
+        // ── v9: 5 Hz visibility target corrector + target encoding ──
+        m.target_correction_type = s.target_correction_type;
+        m.target_correction_type_name = s.target_correction_type_name;
+        m.target_correction_active = s.target_correction_active;
+        m.target_direction_token = s.target_direction_token;
+        m.target_direction_x_body = s.target_direction_x_body;
+        m.target_direction_y_body = s.target_direction_y_body;
+        m.target_distance_normalized = s.target_distance_normalized;
+        m.effective_target_x = s.effective_target_x;
+        m.effective_target_y = s.effective_target_y;
+        m.effective_target_world_valid = s.effective_target_world_valid;
+        m.original_goal[0] = s.original_goal.x();
+        m.original_goal[1] = s.original_goal.y();
+        m.observability_goal_inside_fov = s.observability_goal_inside_fov;
+        m.observability_direct_corridor_blocked =
+            s.observability_direct_corridor_blocked;
+        m.observability_blocker_observed = s.observability_blocker_observed;
+        m.observability_left_bypass_visible =
+            s.observability_left_bypass_visible;
+        m.observability_right_bypass_visible =
+            s.observability_right_bypass_visible;
+        m.observability_local_avoidance_observable =
+            s.observability_local_avoidance_observable;
+        m.observability_fov_boundary_truncated =
+            s.observability_fov_boundary_truncated;
+        m.observability_unknown_occluded = s.observability_unknown_occluded;
+        m.observability_reason = s.observability_reason;
+        m.observability_left_score = s.observability_left_score;
+        m.observability_right_score = s.observability_right_score;
+        m.correction_enter_event = s.correction_enter_event;
+        m.correction_exit_event = s.correction_exit_event;
+        m.correction_update_event = s.correction_update_event;
         m.target_bearing_error_deg = s.target_bearing_error_deg;
         m.selected_terminal_heading_error_deg =
             s.selected_terminal_heading_error_deg;
@@ -934,13 +1051,12 @@ private:
         const auto& out = sim_.lastOutput();
         pub_local_plan_.publish(makePath(trajToPts(out.local.selected)));
         pub_executed_.publish(makePath(sim_.executedPath()));
-        if (show_truth_) {
-            // LEFT/RIGHT/locked are PRIVILEGED routes — never published
-            // (nor shown) when show_truth:=false.
-            pub_left_.publish(makePath(out.left_route.waypoints));
-            pub_right_.publish(makePath(out.right_route.waypoints));
-            pub_locked_.publish(makePath(out.locked_route.waypoints));
-        }
+        // v8: left/right/locked are LOCAL candidate routes (observation-
+        // only), NOT privileged — published regardless of show_truth.  The
+        // topic names are kept ONLY for backwards compatibility.
+        pub_left_.publish(makePath(out.left_route.waypoints));
+        pub_right_.publish(makePath(out.right_route.waypoints));
+        pub_locked_.publish(makePath(out.locked_route.waypoints));
     }
 
     void publishCandidates() {
@@ -1082,18 +1198,67 @@ private:
             arr.markers.push_back(tgt);
         }
 
-        // Blocker — shown whenever an association outcome exists (so the
-        // GUI can inspect NO_MATCH / AMBIGUOUS_MATCH after TASK_INVALID).
-        if (out.blocker_association != BlockerAssociation::NONE) {
-            // Privileged geometry when matched; otherwise show the LOCAL
-            // evidence cluster (observation-only) with the failure state.
-            // In local-only mode never leak matched truth geometry through
-            // the otherwise non-truth debug_markers topic.
-            const bool privileged = show_truth_ && out.blocker.found;
-            const Vec2d bc = privileged ? out.blocker.center
-                                        : out.local_blocker.visible_centroid;
-            const double br = privileged ? out.blocker.radius
-                                         : out.local_blocker.visible_radius;
+        // Original goal — the goal the 5 Hz corrector judges against
+        // (v9).  Distinct white ring so it is never confused with the
+        // (possibly updated) accepted task goal marker.
+        {
+            visualization_msgs::Marker og;
+            og.header = header();
+            og.ns = "original_goal";
+            og.id = id++;
+            og.type = visualization_msgs::Marker::SPHERE;
+            og.action = visualization_msgs::Marker::ADD;
+            og.pose.position.x = s.original_goal.x();
+            og.pose.position.y = s.original_goal.y();
+            og.pose.position.z = 0.09;
+            og.pose.orientation.w = 1.0;
+            og.scale.x = 0.5; og.scale.y = 0.5; og.scale.z = 0.5;
+            og.color.r = 1.0f; og.color.g = 1.0f; og.color.b = 1.0f; og.color.a = 1.0f;
+            arr.markers.push_back(og);
+        }
+
+        // TURN_LEFT / TURN_RIGHT view-rotation ray (v9): the fixed
+        // body-frame FOV-external ray actually handed to the 30 Hz expert.
+        // It is a VIEW-ROTATION-ONLY virtual ray, NOT a certified safe
+        // world waypoint — explicitly labelled so it cannot be mistaken
+        // for a real navigation target.
+        if (s.target_correction_type == static_cast<uint8_t>(TargetCorrectionType::TURN_LEFT) ||
+            s.target_correction_type == static_cast<uint8_t>(TargetCorrectionType::TURN_RIGHT)) {
+            const Vec2d dir_body(s.target_direction_x_body, s.target_direction_y_body);
+            const double dn = std::max(1e-6, dir_body.norm());
+            const Vec2d dir_world = rot2(dir_body / dn, veh.yaw);
+            const Vec2d tip = c + dir_world * p_.obs_range_m;
+            visualization_msgs::Marker ray;
+            ray.header = header();
+            ray.ns = "view_rotation";
+            ray.id = id++;
+            ray.type = visualization_msgs::Marker::ARROW;
+            ray.action = visualization_msgs::Marker::ADD;
+            ray.scale.x = 0.06; ray.scale.y = 0.18; ray.scale.z = 0.18;
+            ray.color.r = 1.0f; ray.color.g = 0.3f; ray.color.b = 0.9f;
+            ray.color.a = 1.0f;
+            geometry_msgs::Point p0, p1;
+            p0.x = c.x(); p0.y = c.y(); p0.z = 0.12;
+            p1.x = tip.x(); p1.y = tip.y(); p1.z = 0.12;
+            ray.points.push_back(p0);
+            ray.points.push_back(p1);
+            arr.markers.push_back(ray);
+            text("view_rotation_label", tip.x(), tip.y(),
+                 s.target_correction_type == static_cast<uint8_t>(TargetCorrectionType::TURN_LEFT)
+                     ? "VIEW ROTATION ONLY (TURN_LEFT)"
+                     : "VIEW ROTATION ONLY (TURN_RIGHT)",
+                 1.0f, 0.3f, 0.9f, 0.9);
+        }
+
+        // LOCAL blocker — v8: shown from the OBSERVATION-ONLY evidence /
+        // local track (there is no privileged blocker anymore).  Never
+        // leaks truth geometry through the otherwise non-truth debug
+        // markers topic.
+        if (out.local_blocker.found || out.local_blocker_track_valid) {
+            const Vec2d bc = out.local_blocker.visible_centroid;
+            const double br = out.local_blocker.found
+                                  ? out.local_blocker.visible_radius
+                                  : 1.0;
             visualization_msgs::Marker blk;
             blk.header = header();
             blk.ns = "blocker";
@@ -1107,23 +1272,20 @@ private:
             blk.scale.x = 2.0 * br;
             blk.scale.y = 2.0 * br;
             blk.scale.z = 0.02;
-            // MATCHED → orange; NO_MATCH/AMBIGUOUS → red (failure).
-            const bool failed =
-                out.blocker_association == BlockerAssociation::NO_MATCH ||
-                out.blocker_association == BlockerAssociation::AMBIGUOUS_MATCH;
-            blk.color.r = failed ? 1.0f : 1.0f;
-            blk.color.g = failed ? 0.1f : 0.5f;
-            blk.color.b = failed ? 0.1f : 0.0f;
+            blk.color.r = 1.0f;
+            blk.color.g = 0.5f;
+            blk.color.b = 0.0f;
             blk.color.a = 0.4f;
             arr.markers.push_back(blk);
             text("blocker_label", bc.x(), bc.y(),
-                 std::string(privileged ? "BLOCKER #" : "EVIDENCE #") +
-                     std::to_string(privileged && !out.blocker.obstacle_ids.empty()
-                                        ? out.blocker.obstacle_ids.front()
-                                        : out.local_blocker.cluster_id) + " " +
-                     blockerAssociationName(out.blocker_association) +
-                     (privileged ? "" : " (local evidence)"),
-                 1.0f, failed ? 1.0f : 0.5f, failed ? 0.1f : 0.0f, 0.8);
+                 "LOCAL EVIDENCE #" +
+                     std::to_string(out.local_blocker.cluster_id) +
+                     " (track " +
+                     (out.local_blocker_track_valid
+                          ? std::to_string(out.local_blocker_track_id)
+                          : "n/a") +
+                     ")  association=NONE (local-only)",
+                 1.0f, 0.5f, 0.0f, 0.8);
         }
 
         // Velocity vector — ARROW with TWO explicit points:
@@ -1150,14 +1312,17 @@ private:
             arr.markers.push_back(vel);
         }
 
-        // FSM / macro text labels.
+        // FSM / correction text labels.
         text("fsm_label", c.x(), c.y() + 1.0,
              std::string(fsmStateName(s.fsm_state)) +
-                 (s.macro_active ? " [MACRO]" : ""),
+                 (s.target_correction_active
+                      ? " [" + s.target_correction_type_name + "]"
+                      : ""),
              1.0f, 1.0f, 1.0f, 1.2);
-        if (s.macro_active) {
+        if (s.target_correction_active) {
             text("macro_label", c.x(), c.y() - 1.2,
-                 "side=" + std::string(sideName(s.side)) + " reason=" + s.side_reason,
+                 "latch=" + std::string(sideName(static_cast<SideSelection>(s.side))) +
+                     " reason=" + s.observability_reason,
                  1.0f, 0.8f, 0.2f, 1.0);
         }
 

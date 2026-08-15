@@ -269,11 +269,11 @@ bool DebugSimulation::advance() {
     obs_grid_.integrate(last_patch_, tick_);
 
     // 2) FSM step (runs the 5 Hz macro expert when tick % 6 == 0).  The
-    //    FSM receives BOTH the instantaneous FOV patch (current_patch,
-    //    for the macro expert's evidence/blocker) and the merged history
-    //    map (for the 30 Hz planner's view).
-    FsmInput in{scene_, esdf_, task_, vehicle_.state(), last_patch_,
-                obs_grid_.observation(), tick_, /*collision=*/false};
+    //    FSM receives BOTH the instantaneous FOV patch (fresh 5 Hz entry /
+    //    side evidence) and the merged causal history map (5 Hz route
+    //    continuity and the 30 Hz planner's view).
+    FsmInput in{task_, vehicle_.state(), last_patch_, obs_grid_.observation(),
+                tick_, /*collision=*/false};
     last_output_ = fsm_.step(in);
 
     // 3) Apply the command to the fixed-step simulator.
@@ -312,7 +312,7 @@ void DebugSimulation::acceptPendingGoal() {
         initial_accepted_goal_ = pending_goal_;
         pending_goal_first_accept_ = false;
     }
-    fsm_.acceptNewGoal(scene_, esdf_, vehicle_.state(), pending_goal_, tick_);
+    fsm_.acceptNewGoal(pending_goal_, tick_);
     pending_goal_set_ = false;
 }
 
@@ -430,6 +430,61 @@ void DebugSimulation::buildSnapshot() {
     s.macro_guide_lookahead = last_output_.macro_guide_lookahead;
     s.macro_guide_update_reason = last_output_.macro_guide_update_reason;
     s.macro_no_progress_duration = last_output_.macro_no_progress_duration;
+    // Local-causal macro diagnostics (v8).
+    s.macro_used_local_history_only =
+        last_output_.macro_used_local_history_only;
+    s.macro_guide_inside_current_fov =
+        last_output_.macro_guide_inside_current_fov;
+    s.macro_guide_endpoint_known_free =
+        last_output_.macro_guide_endpoint_known_free;
+    s.macro_guide_chord_known_free = last_output_.macro_guide_chord_known_free;
+    s.macro_guide_min_observed_clearance =
+        last_output_.macro_guide_min_observed_clearance;
+    s.local_blocker_track_valid = last_output_.local_blocker_track_valid;
+    s.local_blocker_behind = last_output_.local_blocker_behind;
+    s.local_goal_corridor_clear = last_output_.local_goal_corridor_clear;
+    s.local_leave_progress_m = last_output_.local_leave_progress_m;
+    s.local_macro_route_valid = last_output_.local_macro_route_valid;
+    s.relative_target_x_body = last_output_.relative_target_x_body;
+    s.relative_target_y_body = last_output_.relative_target_y_body;
+    s.target_bearing_deg = last_output_.target_bearing_deg;
+    s.target_distance_m = last_output_.target_distance_m;
+    // ── v9: 5 Hz visibility target corrector + target encoding ─────
+    s.target_correction_type = last_output_.target_correction_type;
+    s.target_correction_type_name =
+        last_output_.target_correction_type_name;
+    s.target_correction_active = last_output_.target_correction_active;
+    s.target_direction_token = last_output_.target_direction_token;
+    s.target_direction_x_body = last_output_.target_direction_x_body;
+    s.target_direction_y_body = last_output_.target_direction_y_body;
+    s.target_distance_normalized = last_output_.target_distance_normalized;
+    s.effective_target_x = last_output_.effective_target_x;
+    s.effective_target_y = last_output_.effective_target_y;
+    s.effective_target_world_valid =
+        last_output_.effective_target_world_valid;
+    s.original_goal = last_output_.original_goal;
+    s.observability_goal_inside_fov =
+        last_output_.observability_goal_inside_fov;
+    s.observability_direct_corridor_blocked =
+        last_output_.observability_direct_corridor_blocked;
+    s.observability_blocker_observed =
+        last_output_.observability_blocker_observed;
+    s.observability_left_bypass_visible =
+        last_output_.observability_left_bypass_visible;
+    s.observability_right_bypass_visible =
+        last_output_.observability_right_bypass_visible;
+    s.observability_local_avoidance_observable =
+        last_output_.observability_local_avoidance_observable;
+    s.observability_fov_boundary_truncated =
+        last_output_.observability_fov_boundary_truncated;
+    s.observability_unknown_occluded =
+        last_output_.observability_unknown_occluded;
+    s.observability_reason = last_output_.observability_reason;
+    s.observability_left_score = last_output_.observability_left_score;
+    s.observability_right_score = last_output_.observability_right_score;
+    s.correction_enter_event = last_output_.correction_enter_event;
+    s.correction_exit_event = last_output_.correction_exit_event;
+    s.correction_update_event = last_output_.correction_update_event;
     s.start_clearance_recovery_used =
         last_output_.start_clearance_recovery_used;
     s.unknown_recovery_ticks = last_output_.unknown_recovery_ticks;
@@ -437,9 +492,9 @@ void DebugSimulation::buildSnapshot() {
     s.unknown_recovery_episode_count = last_output_.unknown_recovery_episode_count;
     s.local_target_update_event = last_output_.audit.local_target_update_event;
     s.macro_tick_event = last_output_.macro_tick_event;
-    s.blocker_id = !last_output_.blocker.obstacle_ids.empty()
-                       ? last_output_.blocker.obstacle_ids.front()
-                       : -1;
+    // v8: the "blocker id" is the LOCAL blocker track id (never a truth
+    // obstacle id — the privileged association is gone).
+    s.blocker_id = last_output_.local_blocker_track_id;
     s.blocker_association = last_output_.blocker_association;
     s.blocker_passed_latched = last_output_.blocker_passed_latched;
     s.entry_vehicle_progress = last_output_.entry_vehicle_progress;

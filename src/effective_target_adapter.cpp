@@ -1,0 +1,169 @@
+#include "il_2d_multiscale_debug/effective_target_adapter.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace il_2d_multiscale_debug {
+
+int EffectiveTargetAdapter::quantizeBearing(double bearing_rad) const {
+    const int n = std::max(3, p_.te_direction_bin_count);
+    const double half = binHalfSpanRad();
+    const double w = binWidthRad();
+    if (!(w > 0.0)) {
+        return (n + 1) / 2;  // degenerate config → centre ordinary token
+    }
+    const double b = clamp(wrapAngle(bearing_rad), -half, half);
+    // Tokens follow the physical left-to-right order: class 0 is the
+    // FOV-external LEFT ray, ordinary token 1 starts at +half (left FOV
+    // edge), ordinary token N ends at -half (right FOV edge), and class
+    // N+1 is the FOV-external RIGHT ray.  This keeps neighbouring classes
+    // angularly adjacent for the student.  Exact half-bin ties are resolved
+    // deterministically by lround.
+    int k = static_cast<int>(std::lround((half - b) / w));
+    k = clamp(k, 0, n - 1);
+    return k + 1;  // ordinary classes start at 1 (0 = TURN_LEFT)
+}
+
+double EffectiveTargetAdapter::tokenCenterBearingRad(int token) const {
+    const int n = std::max(3, p_.te_direction_bin_count);
+    if (token < 1 || token > n) return 0.0;  // not an ordinary bin
+    const int k = token - 1;
+    return binHalfSpanRad() - static_cast<double>(k) * binWidthRad();
+}
+
+Vec2d EffectiveTargetAdapter::decodeDirectionToken(int token) const {
+    const int n = std::max(3, p_.te_direction_bin_count);
+    if (token == 0) return turnDirectionBody(SideSelection::LEFT);
+    if (token == n + 1) return turnDirectionBody(SideSelection::RIGHT);
+    const double b = tokenCenterBearingRad(token);
+    return Vec2d(std::cos(b), std::sin(b));
+}
+
+double EffectiveTargetAdapter::clampNormalizedDistance(double dist) const {
+    const double d = clamp(dist, 0.0, normalMaxDistanceM());
+    return d / std::max(1e-9, p_.obs_range_m);
+}
+
+double EffectiveTargetAdapter::turnBearingRad(SideSelection side) const {
+    const double half = deg2rad(p_.obs_fov_deg) / 2.0;
+    const double margin = deg2rad(p_.te_turn_ray_margin_deg);
+    return side == SideSelection::LEFT ? half + margin : -(half + margin);
+}
+
+Vec2d EffectiveTargetAdapter::turnDirectionBody(SideSelection side) const {
+    const double b = turnBearingRad(side);
+    return Vec2d(std::cos(b), std::sin(b));
+}
+
+EncodedTargetInput EffectiveTargetAdapter::encode(
+    const VehicleState2D& state, const Vec2d& original_goal,
+    const TargetCorrectionDirective& directive) const {
+    EncodedTargetInput out;
+    out.valid = true;
+    out.source_type = directive.type;
+    const double yaw = state.yaw;
+    const double R = std::max(1e-9, p_.obs_range_m);
+    const double maxd = normalMaxDistanceM();
+    const double eps = 1e-6;
+
+    switch (directive.type) {
+        case TargetCorrectionType::PASS_THROUGH: {
+            // A: PASS_THROUGH — the ORIGINAL goal, truncated to
+            // R - reserve along the live goal direction.  The C++ 30 Hz
+            // expert receives a local point at the truncated distance so
+            // it goes through the same information bottleneck as the
+            // student; real goal-reached judgement stays with the FSM on
+            // the ORIGINAL goal (never on this truncated point).
+            const Vec2d delta = original_goal - state.position;
+            const double d = delta.norm();
+            if (d <= eps) {
+                // Goal (essentially) reached: canonical encoding.
+                out.direction_body = Vec2d(1.0, 0.0);
+                out.normalized_distance = 0.0;
+                out.effective_target_world = state.position;
+                out.effective_target_world_valid = true;
+                break;
+            }
+            const Vec2d dir_world = delta / d;
+            const double d_clip = std::min(d, maxd);
+            out.direction_body = rot2(dir_world, -yaw);
+            out.normalized_distance = d_clip / R;
+            out.effective_target_world = state.position + dir_world * d_clip;
+            out.effective_target_world_valid = true;
+            break;
+        }
+        case TargetCorrectionType::NORMAL_CORRECTION: {
+            // B: NORMAL_CORRECTION — the locked corrected_target_world is
+            // a FIXED world point for the 5 Hz period.  Every 30 Hz tick
+            // the direction/distance are re-derived from the LIVE pose, so
+            // rotating the vehicle changes the body-frame direction in
+            // real time (never freezing a stale body-frame direction).
+            if (!directive.corrected_target_world_valid) {
+                // Defensive fallback (never expected): pass through the
+                // original goal through the same encoder.
+                TargetCorrectionDirective pt;
+                pt.type = TargetCorrectionType::PASS_THROUGH;
+                pt.valid = true;
+                pt.update_event = directive.update_event;
+                return encode(state, original_goal, pt);
+            }
+            const Vec2d delta =
+                directive.corrected_target_world - state.position;
+            const double d = delta.norm();
+            if (d <= eps) {
+                out.direction_body = Vec2d(1.0, 0.0);
+                out.normalized_distance = 0.0;
+                out.effective_target_world = directive.corrected_target_world;
+                out.effective_target_world_valid = true;
+                break;
+            }
+            const Vec2d dir_world = delta / d;
+            const double d_clip = std::min(d, maxd);
+            out.direction_body = rot2(dir_world, -yaw);
+            out.normalized_distance = d_clip / R;
+            // Keep the C++ expert behind exactly the same distance
+            // bottleneck as the future student.  The correction anchor is
+            // world-latched, but the target delivered on this tick is the
+            // anchor direction clipped to the decoded ordinary distance.
+            // This matters if avoidance temporarily moves the vehicle away
+            // from the latched anchor.
+            out.effective_target_world = state.position + dir_world * d_clip;
+            out.effective_target_world_valid = true;
+            break;
+        }
+        case TargetCorrectionType::TURN_LEFT:
+        case TargetCorrectionType::TURN_RIGHT: {
+            // C: TURN_* — a bounded world-latched direction step. The 5 Hz
+            // corrector captures the initially FOV-external unit direction
+            // in turn_direction_world. Every 30 Hz tick re-expresses that
+            // fixed world direction in the live body frame, so the bearing
+            // converges as the vehicle rotates instead of staying at a
+            // permanent +/-FOV-external angle. Distance remains EXACTLY 1,
+            // which the 30 Hz contract interprets as pure rotation.
+            const SideSelection side =
+                directive.type == TargetCorrectionType::TURN_LEFT
+                    ? SideSelection::LEFT
+                    : SideSelection::RIGHT;
+            Vec2d dir_world;
+            if (directive.turn_direction_world_valid) {
+                dir_world = directive.turn_direction_world;
+                if (dir_world.norm() > eps) {
+                    dir_world.normalize();
+                } else {
+                    dir_world = rot2(turnDirectionBody(side), yaw);
+                }
+            } else {
+                // Compatibility fallback for a stale/legacy directive.
+                dir_world = rot2(turnDirectionBody(side), yaw);
+            }
+            out.direction_body = rot2(dir_world, -yaw);
+            out.normalized_distance = 1.0;
+            out.effective_target_world = state.position + dir_world * R;
+            out.effective_target_world_valid = true;
+            break;
+        }
+    }
+    return out;
+}
+
+}  // namespace il_2d_multiscale_debug

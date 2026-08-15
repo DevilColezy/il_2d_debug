@@ -1,5 +1,5 @@
 # ============================================================================
-#  il_2d_multiscale_debug — default configuration  v5
+#  il_2d_multiscale_debug — default configuration  v9
 #
 #  Loaded into the private namespace of BOTH nodes by
 #  launch/expert_debug.launch.  Parameter names here must match the keys
@@ -26,20 +26,21 @@ drone_radius: 0.15
 # ── Scene generation ────────────────────────────────────────────────────────
 scene_generation:
   min_obstacles: 0
-  max_obstacles: 20
+  # Keep the count moderate so larger cylinders can still be placed without
+  # making whole-scene rejection likely.
+  max_obstacles: 12
   min_radius: 0.1
-  # Extended multi-scale range.  The 40 m x 40 m workspace still leaves
-  # enough boundary room for a 4 m cylinder while producing genuinely large
-  # macro-scale detours.
-  max_radius: 4.0
+  # Extended multi-scale range. The 40 m x 40 m workspace leaves legal
+  # boundary room for an 8 m cylinder, producing long macro-scale detours.
+  max_radius: 8.0
   # "log_uniform" samples radius over the whole scale range (covers small /
   # medium / large obstacles); "uniform" uses a plain linear distribution.
   radius_distribution: "log_uniform"
   safety_clearance: 0.5          # min distance drone center ↔ obstacle surface
   passage_margin: 0.2            # extra surface gap between two obstacles
   boundary_margin: 0.5           # min free lane width kept along the boundary
-  max_attempts_per_obstacle: 100 # rejection samples for a single obstacle
-  max_total_scene_attempts: 48   # whole-scene resamples before giving up
+  max_attempts_per_obstacle: 150 # rejection samples for a single obstacle
+  max_total_scene_attempts: 64   # whole-scene resamples before giving up
 
 # ── Connectivity / A* qualification ─────────────────────────────────────────
 connectivity:
@@ -250,9 +251,12 @@ local_planner:
     smoothness: 0.5
     speed_change: 0.3
     yaw_rate_change: 0.3
-    terminal_heading: 1.5
+    # Mild preference only: during avoidance the nose may deviate from the
+    # target while the velocity-alignment term still preserves goal progress.
+    terminal_heading: 1.0
     velocity_alignment: 1.2
-    cross_track: 1.0
+    # Permit a somewhat wider local detour around an observed obstacle.
+    cross_track: 0.8
     obstacle_risk: 3.0        # v7 continuous early-avoidance risk weight
 
 # ── 5 Hz privileged macro expert ────────────────────────────────────────────
@@ -312,7 +316,6 @@ macro:
   blocker_match_min_cells: 3
   blocker_match_ambiguity_ratio: 0.5
   blocker_match_surface_tol_m: 0.3
-  macro_exit_stable_ticks: 3    # consecutive 5 Hz ticks satisfying exit condition
   # Re-entry hysteresis guard, measured in 30 Hz TICKS (decremented once
   # per 30 Hz tick, so 30 ticks ≈ 1 s).  It is NOT a 5 Hz count.
   macro_reentry_guard_ticks: 30
@@ -333,6 +336,81 @@ macro:
   route_side_bias: 0.4          # accumulated A* penalty on the wrong fixed side
   homotopy_side_tolerance_m: 0.05
   gateway_projection_radius_m: 0.8
+  # ── v8: LOCAL-CAUSAL 5 Hz macro expert ────────────────────────────
+  # v8 起 5Hz 宏观专家是纯局部观测者：不再读取全局 ESDF / 场景真值 /
+  # 全局 A* / 左右特权路线。以下参数控制局部 blocker 跟踪、局部
+  # 候选采样与纯局部退出条件。
+  # 退出前需要相对“宏观进入时”的目标距离缩减量 (m)。
+  local_leave_goal_progress_m: 1.5
+  # “blocker 主要位于车辆侧后方”条件：边界点投影到车辆前向 < -margin (m)
+  # 才算“在后方”。
+  local_blocker_behind_margin_m: 0.5
+  # “主要位于后方”所需的后方边界点占比。
+  local_blocker_behind_fraction: 0.6
+  # 局部 blocker 跟踪超时 (s)：超过该时间没有 current_patch 重新观测，
+  # 禁止预测位置关联和历史地图回填；只允许与既有观测几何邻近的重关联。
+  # 退出仍由完整局部退出条件把关。
+  local_track_timeout_s: 3.0
+  # 局部引导候选采样距离范围 (m)。
+  local_frontier_min_distance_m: 1.5
+  local_frontier_max_distance_m: 4.0
+  # 局部引导候选采样分辨率。
+  local_candidate_bearing_step_deg: 5.0
+  local_candidate_distance_step_m: 0.5
+  # 有界最近 OCCUPIED 搜索半径 (m)：用于弦线净空认证与
+  # guide_min_observed_clearance 诊断。
+  local_clearance_search_radius_m: 3.0
+  # 单个局部 blocker 跟踪保存的已观测边界点数上限。
+  local_track_max_points: 2000
+  # 关联半径 (m)：新簇与已有 track 边界/预测位置在该距离内视为同一
+  # 局部阻挡物（纯观测关联，绝不使用真值 id）。
+  local_track_assoc_radius_m: 2.0
+  # 引导弦线的“恢复前缀”(m)：宏观进入时车辆通常已处于 handoff 净空壳
+  # 内（在 30Hz 硬净空处停车），因此弦线可在该短前缀内爬出净空壳，
+  # 前缀之后（含终点）必须满足 handoff 净空。0 表示禁用恢复前缀。
+  local_recovery_prefix_m: 0.8
+  # ── v9: 5Hz 可见性目标修正器（局部可观测性判断 + 目标修正）──────
+  # v9 起 5Hz 专家不再是“宏观绕行规划器”，而是“局部可观测性判断器 +
+  # 目标修正器”。它只判断“当前 FOV 是否已足以让 30Hz 自行完成局部避障”，
+  # 不足时才临时修正目标（NORMAL_CORRECTION）或强制纯视野旋转
+  # （TURN_LEFT / TURN_RIGHT）。修正进入/刷新/退出都不递增 mission
+  # revision，只更新 directive update event。
+  # 进入修正前需要连续满足“不可观测”的真实 5Hz 周期数。
+  correction_enter_stable_ticks: 1
+  # 可观测性/观察 frontier 候选到车辆的最小距离 (m)。
+  observable_frontier_min_distance_m: 1.5
+  # 局部绕行出口/frontier 相对 original goal 必须提供的最小正向进展 (m)。
+  observable_frontier_min_progress_m: 0.5
+  # 已认证 frontier 点沿同一条射线之后必须继续可见的 known-FREE 格数
+  # （防止把停在 UNKNOWN/FOV 截断边缘的点误判为可用出口）。
+  observable_unknown_margin_cells: 3
+
+# ── v9: 目标编码协议（30Hz 专家与学生共享的信息瓶颈）────────────────
+# 未来 30Hz 学生的输入永远只有：
+#   * 机体系方向单位向量 (direction_x_body, direction_y_body)
+#   * 一个归一化距离 normalized_distance
+# 不向 30Hz 学生增加 mode/token/side 等额外输入。
+# R = observation/range_m；reserve = normal_distance_reserve_m。
+#   普通目标: normal_distance = min(real_dist, R - reserve) / R  ⇒ 严格 < 1；
+#   TURN_LEFT/RIGHT: normalized_distance 强制 = 1.0（由方向类别决定，
+#     解码器强制写入精确 1，绝不依赖网络浮点输出“恰好等于 1”）；
+#   到达终点: normalized_distance = 0，方向用规范占位 (1,0)。
+# 方向类别（学生分类）：0=TURN_LEFT；1..N=从左到右排列的普通 FOV 内 bin；
+# N+1=TURN_RIGHT。
+# 普通 bin 对称覆盖 [-FOV/2 + margin, +FOV/2 - margin]，必须包含 0°。
+target_encoding:
+  # 普通 FOV 内方向 bin 数量（不含 TURN_LEFT/RIGHT）。必须为奇数且 >=3，
+  # 保证 0° 方向被精确包含（默认 11 → 0° 位于中心 bin）。
+  direction_bin_count: 11
+  # 普通目标归一化距离的保留量 (m)：normal_distance_max = (R - reserve)/R
+  # （R=6、reserve=0.5 时 ≈ 0.9167，严格小于 1）。
+  normal_distance_reserve_m: 0.5
+  # 每个有限TURN步发布时相对FOV边缘的初始余量 (deg)：
+  #   left_bearing_body  = +(FOV/2 + turn_ray_margin_deg)
+  #   right_bearing_body = -(FOV/2 + turn_ray_margin_deg)
+  # 发布后方向锁存在世界系，随30Hz姿态变化逐渐进入FOV；同时用作普通
+  # bin覆盖边界的margin。
+  turn_ray_margin_deg: 10.0
 
 vehicle:
   goal_stop_speed_mps: 0.2

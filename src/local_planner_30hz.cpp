@@ -269,6 +269,57 @@ PlannerResult LocalPlanner30Hz::computePlan(const VehicleState2D& state,
                              : deg2rad(p_.lp_turn_enter_deg);
     const double exit_ang = deg2rad(p_.lp_turn_exit_deg);
 
+    // normalized_distance == 1 is the public direction+distance contract's
+    // reserved pure-rotation command. Unlike an ordinary target that has
+    // merely entered the FOV, it must never start a translational rollout.
+    // The target direction is world-latched by the 5 Hz layer, therefore
+    // bearing naturally converges while this branch rotates toward it.
+    const bool pure_rotation_target =
+        target.normalized_distance >= 1.0 - 1e-9;
+    if (pure_rotation_target) {
+        const bool bearing_pending = std::fabs(bearing) > exit_ang;
+        const bool yaw_rate_pending =
+            std::fabs(state.yaw_rate) > p_.lp_turn_exit_max_yaw_rate;
+        const bool rotation_pending = bearing_pending || yaw_rate_pending;
+        turn_hysteresis_active_ = rotation_pending;
+
+        const double yaw_intent = bearing_pending
+            ? clamp(p_.lp_turn_k * bearing, -p_.lp_max_yaw_rate,
+                    p_.lp_max_yaw_rate)
+            : 0.0;
+        const BodyCommand2D intent{0.0, 0.0, yaw_intent};
+        const BodyCommand2D out = reachableCommand(state, intent);
+        res.success = true;
+        res.turn_mode = rotation_pending;
+        res.intent_vx_body = intent.vx_body;
+        res.intent_vy_body = intent.vy_body;
+        res.intent_yaw_rate = intent.yaw_rate;
+        res.vx_body = out.vx_body;
+        res.vy_body = out.vy_body;
+        res.yaw_rate = out.yaw_rate;
+        res.selected_output_speed_mps = std::hypot(out.vx_body, out.vy_body);
+        res.planner_status = rotation_pending ? PlannerStatus::TURNING
+                                              : PlannerStatus::SAFE_HOLD;
+        res.candidate_progress_qualified = false;
+        res.output_progress_qualified = false;
+        res.progress_qualified = false;
+        res.stationary_candidate_selected =
+            res.selected_output_speed_mps <= p_.lp_min_progress_speed_mps;
+        res.stationary_selection_reason = rotation_pending
+            ? "distance_one_pure_rotation"
+            : "distance_one_waiting_for_5hz";
+        res.failure_reason = FailureReason::NONE;
+        if (mutate) {
+            current_trajectory_ = Trajectory2D{};
+            last_command_ = out;
+            has_last_command_ = true;
+            limit_cycle_window_.clear();
+            limit_cycle_detected_ = false;
+            last_cycle_mission_revision_ = target.mission_revision;
+        }
+        return res;
+    }
+
     // TURN hysteresis.  Exit requires BOTH a small remaining bearing AND a
     // small ACTUAL yaw rate (so a residual rotation cannot overshoot the
     // target heading after leaving turn mode).  The turn command itself is
@@ -894,6 +945,61 @@ std::vector<LocalPlannerCandidate> LocalPlanner30Hz::generateCandidates(
     // AND identical output pair (an exact duplicate) collapses.  A sorted
     // map keeps the result independent of the enumeration order and the
     // LEFT/RIGHT samples strictly symmetric.
+    // Add a small, deterministic set of low-speed FOV-edge escape intents.
+    // The rectangular (vx, vy) lattice above has an important blind spot:
+    // near standstill its smallest useful diagonal can be too shallow to
+    // clear a close blocker, while the next lateral sample points outside
+    // the current FOV. Then a geometrically visible bypass exists but all
+    // progressing lattice candidates are rejected and only STOP remains.
+    //
+    // These intents do not use obstacle truth, a selected side, or any 5 Hz
+    // state. Both sides are sampled symmetrically and the normal candidate
+    // evaluator still enforces current-FOV, known-free, hard/dynamic
+    // clearance, braking and target-progress constraints. A small same-side
+    // yaw rate lets the receding-horizon prefix rotate the sensor wedge while
+    // beginning a clearance-increasing holonomic sidestep.
+    double min_positive_speed = std::numeric_limits<double>::infinity();
+    for (double speed : p_.lp_speed_samples) {
+        if (speed > 1e-6) {
+            min_positive_speed = std::min(min_positive_speed, speed);
+        }
+    }
+    if (std::isfinite(min_positive_speed)) {
+        const double fov_half = 0.5 * deg2rad(p_.obs_fov_deg);
+        const double escape_yaw_rate = std::min(0.25, p_.lp_max_yaw_rate);
+        const double escape_speeds[2] = {
+            0.5 * min_positive_speed, min_positive_speed};
+        const double bearing_fractions[2] = {0.75, 0.90};
+        for (double speed : escape_speeds) {
+            if (speed <= 1e-6) continue;
+            for (double fraction : bearing_fractions) {
+                for (int side_sign : {-1, 1}) {
+                    const double bearing =
+                        static_cast<double>(side_sign) * fraction * fov_half;
+                    const double vx = speed * std::cos(bearing);
+                    const double vy = speed * std::sin(bearing);
+                    const double yaw_options[2] = {
+                        0.0,
+                        static_cast<double>(side_sign) * escape_yaw_rate};
+                    for (double yr : yaw_options) {
+                        const BodyCommand2D out_cmd = reachableCommand(
+                            state, BodyCommand2D{vx, vy, yr});
+                        Raw r;
+                        r.desired_vx = vx;
+                        r.desired_vy = vy;
+                        r.desired_yr = yr;
+                        r.vx = out_cmd.vx_body;
+                        r.vy = out_cmd.vy_body;
+                        r.yr = out_cmd.yaw_rate;
+                        raws.push_back(r);
+                    }
+                }
+            }
+        }
+    }
+
+    // Deterministic de-duplication starts after both candidate families
+    // have been assembled.
     constexpr double kQ = 1e4;
     using JointKey =
         std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>;
@@ -975,14 +1081,105 @@ bool LocalPlanner30Hz::evaluateCandidate(LocalPlannerCandidate& c,
     const double seg_step = std::max(1e-3, 0.5 * p_.obs_resolution);
 
     // ── NOMINAL rollout (v5) ───────────────────────────────────────
-    // c.traj currently holds the FULL 2.5 s nominal rollout predicted with
-    // the long-term INTENT.  Keep a copy for the nominal-progress diagnostic
-    // and pre-collect the observed OCCUPIED cells that could fall inside any
-    // sample's search disk (see collectOccupiedCells) so the per-sample
-    // check below iterates only occupied cells with identical semantics.
+    // c.traj initially holds the FULL 2.5 s nominal rollout predicted with
+    // the long-term INTENT.  A LocalTarget is a capture point, not a command
+    // to continue travelling through it.  Limit the nominal rollout at the
+    // first target capture / target-plane crossing (or at the closest point
+    // when a candidate starts moving away).  Otherwise an obstacle behind a
+    // near target can enter the 2.5 s prediction and create a false
+    // avoidance cost or even reject the candidate.
+    auto limitTrajectoryAtTarget = [&](const Trajectory2D& full) {
+        if (!full.valid || full.points.size() < 2) return full;
+
+        const double goal_tol = std::max(1e-6, p_.task_goal_tolerance);
+        const Vec2d to_target = target.position - state.position;
+        const double target_dist = to_target.norm();
+        const Vec2d target_dir = target_dist > 1e-9
+            ? to_target / target_dist
+            : Vec2d(1.0, 0.0);
+
+        size_t stop_index = full.points.size() - 1;
+        size_t closest_index = 0;
+        double closest_dist = target_dist;
+        bool explicit_stop = false;
+        for (size_t i = 1; i < full.points.size(); ++i) {
+            const Vec2d rel = full.points[i] - state.position;
+            const double d = (target.position - full.points[i]).norm();
+            if (d < closest_dist) {
+                closest_dist = d;
+                closest_index = i;
+            }
+            // Reaching the accepted target disk is the primary stop rule.
+            if (d <= goal_tol) {
+                stop_index = i;
+                explicit_stop = true;
+                break;
+            }
+            // A candidate can pass beside the target without entering its
+            // disk.  Stop at the target plane plus tolerance so it cannot
+            // continue into geometry that lies beyond the LocalTarget.
+            if (rel.dot(target_dir) >= target_dist + goal_tol) {
+                stop_index = i;
+                explicit_stop = true;
+                break;
+            }
+        }
+
+        // If the candidate never reaches/crosses the target, do not keep the
+        // post-turning tail after its closest approach.  Retain at least one
+        // control interval so stationary/slow candidates remain evaluable.
+        if (!explicit_stop && closest_index > 0 &&
+            closest_index + 1 < full.points.size()) {
+            const double next_dist =
+                (target.position - full.points[closest_index + 1]).norm();
+            if (next_dist > closest_dist + 1e-6) {
+                stop_index = closest_index;
+            }
+        }
+        if (stop_index + 1 >= full.points.size()) return full;
+
+        Trajectory2D limited;
+        limited.valid = full.valid;
+        limited.points.reserve(stop_index + 1);
+        limited.yaw.reserve(std::min(stop_index + 1, full.yaw.size()));
+        limited.t.reserve(std::min(stop_index + 1, full.t.size()));
+        for (size_t i = 0; i <= stop_index; ++i) {
+            limited.points.push_back(full.points[i]);
+            if (i < full.yaw.size()) limited.yaw.push_back(full.yaw[i]);
+            if (i < full.t.size()) limited.t.push_back(full.t[i]);
+        }
+        return limited;
+    };
+
+    c.traj = limitTrajectoryAtTarget(c.traj);
+    // Keep nominal and executable-prefix evaluation on the same target-
+    // limited horizon.  The latter is still shortened further below by FOV,
+    // UNKNOWN, and observed-clearance checks.
     c.nominal_traj = c.traj;
     std::vector<Vec2d> occ_cells;
     collectOccupiedCells(c.traj, obs, occ_cells);
+
+    // Soft obstacle risk is also target-bounded.  The shared risk
+    // neighbourhood is intentionally larger than the current target so the
+    // planner can react early, but cells strictly beyond the target plane
+    // must not create an avoidance preference for this LocalTarget.  Hard
+    // and dynamic clearance for the target-limited trajectory are still
+    // checked above through occ_cells.
+    std::vector<Vec2d> target_risk_cells;
+    target_risk_cells.reserve(risk_occ_cells.size());
+    const Vec2d risk_to_target = target.position - state.position;
+    const double risk_target_dist = risk_to_target.norm();
+    const Vec2d risk_target_dir = risk_target_dist > 1e-9
+        ? risk_to_target / risk_target_dist
+        : Vec2d(1.0, 0.0);
+    const double target_risk_limit =
+        risk_target_dist + std::max(0.0, p_.task_goal_tolerance);
+    for (const Vec2d& cell : risk_occ_cells) {
+        if ((cell - state.position).dot(risk_target_dir) <=
+            target_risk_limit + 1e-9) {
+            target_risk_cells.push_back(cell);
+        }
+    }
 
     // Per-sample check: CURRENT FOV + known-FREE + soft clearance +
     // dynamic braking envelope.
@@ -1176,9 +1373,10 @@ bool LocalPlanner30Hz::evaluateCandidate(LocalPlannerCandidate& c,
 
     // ── Progress metrics (v5) ──────────────────────────────────────
     // executable_progress_m = dist_current - dist_exec_prefix_end; the
-    // nominal_progress_m is measured over the FULL 2.5 s nominal rollout.
-    // Both measure progress toward the CURRENT LocalTarget (rebuilt every
-    // tick, so rolling targets are supported naturally).  A candidate that
+    // nominal_progress_m is measured over the target-limited nominal rollout
+    // (at most 2.5 s, ending at target capture / closest approach).  Both
+    // measure progress toward the CURRENT LocalTarget (rebuilt every tick,
+    // so rolling targets are supported naturally).  A candidate that
     // clearly moves AWAY from the LocalTarget is still rejected
     // (max_allowed_regress_m); small zero-progress candidates remain in the
     // set but are classified SAFE_HOLD (never SAFE_PROGRESSING) and can
@@ -1411,12 +1609,12 @@ bool LocalPlanner30Hz::evaluateCandidate(LocalPlannerCandidate& c,
     const double cost_velocity_alignment = velocity_alignment_error;
 
     // ── Continuous early-avoidance risk (v7) ───────────────────────
-    // Computed from the NOMINAL rollout and the pre-collected observed
-    // OCCUPIED cells.  This is the term that starts avoidance long before
+    // Computed from the TARGET-LIMITED nominal rollout and the target-bounded
+    // observed OCCUPIED cells.  This is the term that starts avoidance long before
     // the hard clearance gate: a straight candidate at an obstacle 4 m away
     // in its travel corridor already carries a non-zero risk, so a small
     // deceleration / lateral / turn wins the cost comparison immediately.
-    computeObstacleRisk(c, state, risk_occ_cells);
+    computeObstacleRisk(c, state, target_risk_cells);
     const double cost_obstacle_risk = c.obstacle_risk_cost;
 
     const double total =

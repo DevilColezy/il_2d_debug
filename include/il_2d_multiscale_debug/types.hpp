@@ -126,28 +126,31 @@ enum class CellState : uint8_t { FREE = 0, OCCUPIED = 1, UNKNOWN = 2 };
 
 // ═══════════════════════════════════════════════════════════════════
 //  Enum: FSM states
-// ═══════════════════════════════════════════════════════════════════
+//
+//  v9: the 5 Hz expert is no longer a "macro route planner" with its own
+//  guidance states.  It is a LOCAL-OBSERVABILITY JUDGE + TARGET
+//  CORRECTOR that runs on every 5 Hz boundary and outputs a
+//  TargetCorrectionDirective (PASS_THROUGH / NORMAL_CORRECTION /
+//  TURN_LEFT / TURN_RIGHT), converted every 30 Hz tick by the
+//  EffectiveTargetAdapter into the LocalTarget the 30 Hz planner sees.
+//  The FSM therefore only owns the 30 Hz planner's own behaviour states
+//  (DIRECT_LOCAL / TURN_TO_TARGET) plus the terminal states.  The old
+//  LOCAL_BLOCKED_PENDING / MACRO_SELECT_SIDE / MACRO_GUIDANCE /
+//  MACRO_EXIT_PENDING states are REMOVED (the 5 Hz corrector never reads
+//  the 30 Hz outcome, so there is nothing to "block" on).
 enum class FsmState : uint8_t {
     DIRECT_LOCAL = 0,
     TURN_TO_TARGET = 1,
-    LOCAL_BLOCKED_PENDING = 2,
-    MACRO_SELECT_SIDE = 3,
-    MACRO_GUIDANCE = 4,
-    MACRO_EXIT_PENDING = 5,
-    GOAL_REACHED = 6,
-    TASK_INVALID = 7,
-    COLLISION = 8,
-    TIMEOUT = 9,
+    GOAL_REACHED = 2,
+    TASK_INVALID = 3,
+    COLLISION = 4,
+    TIMEOUT = 5,
 };
 
 inline const char* fsmStateName(FsmState s) {
     switch (s) {
         case FsmState::DIRECT_LOCAL: return "DIRECT_LOCAL";
         case FsmState::TURN_TO_TARGET: return "TURN_TO_TARGET";
-        case FsmState::LOCAL_BLOCKED_PENDING: return "LOCAL_BLOCKED_PENDING";
-        case FsmState::MACRO_SELECT_SIDE: return "MACRO_SELECT_SIDE";
-        case FsmState::MACRO_GUIDANCE: return "MACRO_GUIDANCE";
-        case FsmState::MACRO_EXIT_PENDING: return "MACRO_EXIT_PENDING";
         case FsmState::GOAL_REACHED: return "GOAL_REACHED";
         case FsmState::TASK_INVALID: return "TASK_INVALID";
         case FsmState::COLLISION: return "COLLISION";
@@ -194,7 +197,7 @@ inline const char* failureReasonName(FailureReason r) {
 //  or when every motion candidate is unsafe.
 enum class PlannerStatus : uint8_t {
     SAFE_PROGRESSING = 0,             // safe AND valid target-direction progress
-    SAFE_HOLD = 1,                    // safe but no progress (only selectable near goal)
+    SAFE_HOLD = 1,                    // safe zero-progress hold / settled distance-1 turn
     TERMINAL_SETTLING = 2,            // inside the terminal convergence region
     TURNING = 3,                      // TURN_TO_TARGET (rotate in place)
     EMERGENCY_BRAKE = 4,              // stopping distance not available
@@ -246,14 +249,14 @@ struct Params2D {
     double drone_radius = 0.15;
 
     // scene generation
-    int    scene_min_obstacles = 0, scene_max_obstacles = 20;
-    double scene_min_radius = 0.1, scene_max_radius = 4.0;
+    int    scene_min_obstacles = 0, scene_max_obstacles = 12;
+    double scene_min_radius = 0.1, scene_max_radius = 8.0;
     std::string scene_radius_distribution = "log_uniform";
     double scene_safety_clearance = 0.5;
     double scene_passage_margin = 0.2;
     double scene_boundary_margin = 0.5;
-    int    scene_max_attempts_per_obstacle = 60;
-    int    scene_max_total_scene_attempts = 24;
+    int    scene_max_attempts_per_obstacle = 150;
+    int    scene_max_total_scene_attempts = 64;
 
     // connectivity
     int    conn_neighbor = 8;
@@ -424,9 +427,12 @@ struct Params2D {
     // yaw-rate oscillation) — replaces the old absolute-turning cost that
     // penalised legitimate heading correction towards the target.
     double cost_w_yaw_rate_change = 0.3;
-    double cost_w_terminal_heading = 1.5;
+    // Keep a preference for looking toward the local target, but do not let
+    // nose alignment dominate a safe lateral avoidance manoeuvre.  Velocity
+    // alignment remains stronger because it represents actual goal progress.
+    double cost_w_terminal_heading = 1.0;
     double cost_w_velocity_alignment = 1.2;
-    double cost_w_cross_track = 1.0;
+    double cost_w_cross_track = 0.8;
     // Weight of the normalized continuous obstacle-risk cost term (v7).
     double cost_w_obstacle_risk = 3.0;
 
@@ -489,7 +495,6 @@ struct Params2D {
     // Max geometric residual (m) for a visible cell to count as support
     // for a truth cylinder (surface/inside distance).
     double macro_blocker_match_surface_tol_m = 0.3;
-    int    macro_exit_stable_ticks = 3;
     int    macro_reentry_guard_ticks = 30;
     double macro_route_clearance_margin = 0.1;
     // Bounded radius (m) of the start-clearance recovery search: when the
@@ -508,6 +513,109 @@ struct Params2D {
     // diagnostic becomes active.  NO_SAFE_CANDIDATE never triggers the 5 Hz
     // macro expert and never counts as real blockage.
     int    macro_unknown_recovery_threshold_ticks = 60;
+
+    // ── Local-causal 5 Hz macro expert (v8) ────────────────────────
+    // v8: the 5 Hz macro expert is a PURE LOCAL observer.  It never reads
+    // the global ESDF, the scene obstacles, global A* routes or global
+    // connectivity; every runtime decision (blocker, side, guide, route,
+    // blocker-passed, exit) is computed from the current FOV patch + the
+    // merged local history map + the vehicle state + the final goal + its
+    // own long-term memory (local blocker track / locked side / previous
+    // guide).  The parameters below control that local pipeline.
+    // Required goal-distance reduction (m) from the macro-entry value
+    // before the local blocker-passed / exit check may pass.
+    double macro_local_leave_goal_progress_m = 1.5;
+    // Forward-projection margin (m) behind the vehicle used by the
+    // "blocker mainly behind" condition: a tracked boundary point counts
+    // as behind when its projection onto the vehicle forward axis is
+    // < -margin.
+    double macro_local_blocker_behind_margin_m = 0.5;
+    // Minimum fraction of the tracked blocker's observed boundary points
+    // that must lie behind the vehicle (see above) for the "mainly
+    // behind" condition to hold.
+    double macro_local_blocker_behind_fraction = 0.6;
+    // Local blocker track timeout (s): after this long without a CURRENT
+    // patch association, predicted association and history back-fill are
+    // disabled; only geometry-near re-association is accepted.  The exit
+    // conditions still gate the real exit.
+    double macro_local_track_timeout_s = 3.0;
+    // Local guide candidate sampling range (m): the deterministic local
+    // candidate set samples lookahead distances in this interval.
+    double macro_local_frontier_min_distance_m = 1.5;
+    double macro_local_frontier_max_distance_m = 4.0;
+    // Local guide candidate sampling resolution.
+    double macro_local_candidate_bearing_step_deg = 5.0;
+    double macro_local_candidate_distance_step_m = 0.5;
+    // Radius (m) of the bounded nearest-OCCUPIED search used for the
+    // observed-clearance measurements (chord certification + the
+    // guide_min_observed_clearance diagnostic).
+    double macro_local_clearance_search_radius_m = 3.0;
+    // Max number of observed boundary points kept in one local blocker
+    // track (memory bound; the track is observation-only).
+    int    macro_local_track_max_points = 2000;
+    // Association radius (m): a newly observed cluster whose cells lie
+    // within this distance of the tracked boundary set / the predicted
+    // track position is treated as the SAME local blocker (never a truth
+    // id — pure observation association).
+    double macro_local_track_assoc_radius_m = 2.0;
+    // Recovery prefix (m) of a guide chord that may lie inside the
+    // handoff-inflated observed clearance shell.  The vehicle itself is
+    // normally inside that shell when the macro triggers (it stopped at
+    // the 30 Hz hard clearance), so the straight chord to the guide may
+    // climb out of the shell for this short prefix; everything beyond it
+    // (including the endpoint) must be handoff-clear.  0 disables the
+    // recovery prefix entirely.
+    double macro_local_recovery_prefix_m = 0.8;
+
+    // ── v9: 5 Hz VISIBILITY TARGET CORRECTOR (local observability judge
+    //        + target corrector) and target-encoding protocol ─────────
+    // The 5 Hz expert no longer plans detour routes.  It only answers
+    // "does the current FOV already contain enough information for the
+    // 30 Hz expert to finish its own local avoidance?" and, when not,
+    // temporarily corrects the tracked target (NORMAL_CORRECTION) or
+    // forces a pure view rotation (TURN_LEFT / TURN_RIGHT).  The
+    // EffectiveTargetAdapter converts the zero-order-held directive into
+    // the LocalTarget world point for the C++ 30 Hz expert AND into the
+    // body-frame unit direction + normalized distance that a future 30 Hz
+    // student would consume.  All values are pure geometry / timing with
+    // finiteness + range checks in params_io.
+    // Number of ordinary in-FOV direction bins (NOT counting the special
+    // TURN_LEFT / TURN_RIGHT classes).  Must be ODD (>= 3) so the bins
+    // are symmetric around the 0° (forward) direction and include it
+    // exactly.  Total student classes = direction_bin_count + 2
+    // (class 0 = TURN_LEFT, classes 1..N = ordinary bins, class N+1 =
+    // TURN_RIGHT).
+    int    te_direction_bin_count = 11;
+    // reserve_m of the normal-distance encoding:
+    //   normal_distance = min(real_target_distance, R - reserve_m) / R
+    // with R = observation/range_m.  The maximum normalized distance of an
+    // ORDINARY target is therefore strictly < 1
+    // (normal_distance_max = (R - reserve_m)/R ≈ 0.9167 for R=6, r=0.5),
+    // which keeps ordinary classes distinguishable from the TURN classes
+    // that carry an EXACT normalized distance of 1.0.
+    double te_normal_distance_reserve_m = 0.5;
+    // Initial margin (deg) of each bounded TURN step outside the FOV:
+    //   left_bearing_body  = +(FOV/2 + turn_ray_margin_deg)
+    //   right_bearing_body = -(FOV/2 + turn_ray_margin_deg)
+    // The direction is then world-latched until it enters the FOV. The
+    // same margin is used as the ordinary-bin coverage margin (the
+    // ordinary bins symmetrically cover [-FOV/2 + margin, +FOV/2 - margin]).
+    double te_turn_ray_margin_deg = 10.0;
+    // Consecutive real 5 Hz cycles for which the enter condition must hold
+    // before the corrector enters a correction episode.
+    int    macro_correction_enter_stable_ticks = 1;
+    // Minimum distance (m) from the vehicle of a certified local bypass /
+    // observation frontier candidate used by the observability judgement
+    // and by NORMAL_CORRECTION target selection.
+    double macro_observable_frontier_min_distance_m = 1.5;
+    // Minimum forward progress (m) toward the original goal that a local
+    // bypass exit / observation frontier must provide to count as
+    // "observable" (the 30 Hz expert would be able to make real progress).
+    double macro_observable_frontier_min_progress_m = 0.5;
+    // Minimum number of known-FREE cells that must extend BEYOND a
+    // certified frontier point (along the same ray) before the exit counts
+    // as non-truncated (not merely stopping at an UNKNOWN / FOV boundary).
+    int    macro_observable_unknown_margin_cells = 3;
 
     // vehicle/referee thresholds
     double vehicle_goal_stop_speed_mps = 0.2;
@@ -677,17 +785,28 @@ struct LocalObservation {
 struct LocalTarget {
     Vec2d position{0.0, 0.0};
     bool valid = false;
-    bool is_macro_guide = false;  // true while a 5 Hz macro guide is active
-    // Numeric VALUE update event (5 Hz ZOH boundary).  Increments whenever
-    // the delivered target value changes; used for logging / visualization
-    // only.  A change of this counter alone NEVER resets planner memory.
+    bool is_macro_guide = false;  // legacy compatibility field; v9 keeps it
+                                  // false so 30 Hz receives no mode signal
+    // Semantic directive update event (5 Hz ZOH boundary), used for
+    // logging / visualization only. It does not follow the live clipped
+    // PASS_THROUGH point or live pose re-expression of a TURN anchor. A change of this
+    // counter alone NEVER resets planner memory.
+    // v9: it equals the 5 Hz directive update_event — it changes ONLY on a
+    // real 5 Hz directive change (type / side / NORMAL target / bounded
+    // TURN anchor), never on a per-30Hz live coordinate transform.
     uint64_t update_event = 0;
-    // MISSION revision.  Changed by the FSM on: new task / reset, every
-    // formally accepted final navigation-goal revision, and entering /
-    // leaving macro mode.  The 30 Hz planner resets
-    // its per-mission memory (command continuity, stall window) only when
-    // this changes — never on a plain update_event change.
+    // MISSION revision.  Changed by the FSM ONLY on: new task / scene
+    // reset and every formally accepted final navigation-goal revision.
+    // v9: entering / refreshing / leaving a 5 Hz correction NEVER changes
+    // it (the 30 Hz planner must not clear its internal memory because the
+    // 5 Hz corrector intervened).  The 30 Hz planner resets its per-mission
+    // memory (command continuity, stall window) only when this changes —
+    // never on a plain update_event change.
     uint64_t mission_revision = 0;
+    // The second channel of the public 30 Hz target contract. Ordinary
+    // targets are strictly below 1; an exact value of 1 is the reserved
+    // pure-rotation command. This is not a hidden correction-mode flag.
+    double normalized_distance = 0.0;
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -727,7 +846,8 @@ struct PlannerResult {
     bool candidate_progress_qualified = false;
     bool output_progress_qualified = false;
     bool progress_qualified = false;
-    // Progress over the FULL 2.5 s nominal rollout (intent-driven).
+    // Progress over the target-limited nominal rollout (intent-driven,
+    // ending at target capture / closest approach and never beyond it).
     double nominal_progress_m = 0.0;
     // Progress over the CERTIFIED executable safe prefix (what will really
     // be executed before the next 30 Hz replan).
@@ -858,7 +978,12 @@ struct AuditFlags {
     bool used_truth_by_local_planner = false;
     bool used_global_esdf_by_local_planner = false;
     bool used_global_path_by_local_planner = false;
+    // v8: always false — the 5 Hz expert no longer touches the global
+    // truth ESDF at runtime (it is a pure local observer).
     bool macro_used_privileged_esdf = false;
+    // v8: true whenever the 5 Hz macro expert ran using ONLY local
+    // observations (current_patch + local_history_map + its own memory).
+    bool macro_used_local_history_only = false;
     bool side_selected_from_visible_evidence = false;
     bool side_ambiguous_defaulted_right = false;
     // True whenever the side evidence was computed from the INSTANTANEOUS
@@ -912,6 +1037,135 @@ struct SideEvidence {
     std::string reason = "NONE";
 };
 
+// ═══════════════════════════════════════════════════════════════════
+//  v9: 5 Hz target-correction types (local observability judge)
+// ═══════════════════════════════════════════════════════════════════
+//  The 5 Hz expert is a PURE LOCAL "visibility judge + target corrector".
+//  It never reads the 30 Hz planner outcome (PlannerResult / PreviewResult
+//  / FailureReason / PlannerStatus / previewPlan / turn_mode /
+//  emergency_brake / blocked_observed / consecutive failures), the global
+//  ESDF, the scene truth, global A* or the global left/right routes.  Its
+//  only output is a zero-order-held TargetCorrectionDirective:
+//    PASS_THROUGH        → the 30 Hz expert keeps tracking the ORIGINAL
+//                          goal (its FOV already contains everything it
+//                          needs to finish local avoidance itself);
+//    NORMAL_CORRECTION   → temporarily retarget the 30 Hz expert at a
+//                          quantized in-FOV frontier on the locked side;
+//    TURN_LEFT / TURN_RIGHT → force a pure view rotation toward the
+//                          FOV-external ray on the locked side until the
+//                          local bypass becomes observable.
+enum class TargetCorrectionType : uint8_t {
+    PASS_THROUGH = 0,
+    NORMAL_CORRECTION = 1,
+    TURN_LEFT = 2,
+    TURN_RIGHT = 3,
+};
+
+inline const char* targetCorrectionTypeName(TargetCorrectionType t) {
+    switch (t) {
+        case TargetCorrectionType::PASS_THROUGH: return "PASS_THROUGH";
+        case TargetCorrectionType::NORMAL_CORRECTION: return "NORMAL_CORRECTION";
+        case TargetCorrectionType::TURN_LEFT: return "TURN_LEFT";
+        case TargetCorrectionType::TURN_RIGHT: return "TURN_RIGHT";
+    }
+    return "UNKNOWN";
+}
+
+/// The 5 Hz corrector's output, zero-order held between 5 Hz boundaries.
+/// The EffectiveTargetAdapter converts it every 30 Hz tick into the
+/// EncodedTargetInput (body direction unit vector + normalized distance
+/// for the future 30 Hz student AND the LocalTarget world point for the
+/// current C++ 30 Hz expert).
+struct TargetCorrectionDirective {
+    TargetCorrectionType type = TargetCorrectionType::PASS_THROUGH;
+    bool valid = true;
+    // Student direction class:
+    //   0                 = TURN_LEFT (special class),
+    //   1 .. N            = ordinary in-FOV bins ordered LEFT to RIGHT
+    //                       (N = direction_bin_count),
+    //   N + 1             = TURN_RIGHT (special class).
+    // -1 for PASS_THROUGH (no direction label).
+    int direction_token = -1;
+    // Direction decoded at the 5 Hz decision instant (bin centre for an
+    // ordinary target, initial FOV-external ray for a bounded TURN step).
+    // During TURN the adapter re-expresses the latched world direction at
+    // every live pose, so the actual 30 Hz body direction then converges.
+    Vec2d decoded_direction_body{1.0, 0.0};
+    // DECODED normalized distance (student label).  For ordinary classes
+    // it is clamped to normal_distance_max < 1; for TURN classes it is
+    // EXACTLY 1.0; for PASS_THROUGH it is meaningless (the adapter
+    // recomputes the live value from the original goal).
+    double normalized_distance = 0.0;
+    // NORMAL_CORRECTION: world point locked during the 5 Hz period and
+    // rebuilt from the QUANTIZED direction + clamped distance. Invalid for
+    // PASS_THROUGH / TURN.
+    Vec2d corrected_target_world{0.0, 0.0};
+    bool corrected_target_world_valid = false;
+    // TURN_LEFT / TURN_RIGHT: world-frame UNIT direction captured when the
+    // bounded turn step is issued. Position drift cannot rotate this
+    // direction; its body bearing changes only with live yaw. Invalid for
+    // PASS_THROUGH / NORMAL_CORRECTION.
+    Vec2d turn_direction_world{1.0, 0.0};
+    bool turn_direction_world_valid = false;
+    // Side locked for the current correction episode (NONE when not
+    // correcting).  Never switches inside one episode.
+    SideSelection locked_side = SideSelection::NONE;
+    // Directive update event: increments ONLY when the directive value
+    // changes on a real 5 Hz boundary (type / side / NORMAL target value).
+    // Live pose re-expression of a latched world direction never bumps it.
+    uint64_t update_event = 0;
+    std::string reason = "PASS_THROUGH";
+};
+
+/// Local observability judgement of the 5 Hz corrector (deterministic,
+/// local, causal — current FOV patch plus the decaying local history map).
+struct AvoidanceObservability {
+    // Original-goal direction inside the current FOV (raw, no margin).
+    bool goal_inside_fov = false;
+    // An OCCUPIED cell blocks the vehicle→original-goal local corridor
+    // (checked only to perception range in the causal local map; UNKNOWN
+    // is never treated as FREE).
+    bool direct_corridor_blocked = false;
+    // direct_corridor_blocked with an actual observed OCCUPIED cluster
+    // (i.e. a real blocker, not merely occlusion).
+    bool blocker_observed = false;
+    // A clear, connected, known-free local bypass exit on each side is
+    // fully visible inside the current FOV (enough clearance, positive
+    // progress, not truncated by UNKNOWN / FOV boundary).
+    bool left_bypass_observable = false;
+    bool right_bypass_observable = false;
+    // true ⇔ the current FOV already gives the 30 Hz expert everything it
+    // needs for its own local avoidance:
+    //   (goal_inside_fov && direct corridor clear) OR
+    //   (left || right) certified bypass.
+    bool local_avoidance_observable = false;
+    // The needed exit region is cut off by the FOV boundary.
+    bool fov_boundary_truncated = false;
+    // The view toward the corridor / exit is occluded by UNKNOWN cells.
+    bool unknown_occluded = false;
+    // Side evidence scores (m): farthest certified frontier distance on
+    // each side (0 when none) — observation-only.
+    double left_score = 0.0;
+    double right_score = 0.0;
+    std::string reason = "NONE";
+};
+
+/// The adapter's per-30Hz-tick output — the exact information bottleneck
+/// shared by the C++ 30 Hz expert (world target) and a future 30 Hz
+/// student (body direction + normalized distance).
+struct EncodedTargetInput {
+    bool valid = false;
+    // Body-frame unit direction (+X forward, +Y left).
+    Vec2d direction_body{1.0, 0.0};
+    // Normalized distance (0 .. 1).  Ordinary targets: clamped to
+    // normal_distance_max < 1; TURN classes: EXACTLY 1.0; at the goal: 0.
+    double normalized_distance = 0.0;
+    // World point handed to the C++ 30 Hz expert as its LocalTarget.
+    Vec2d effective_target_world{0.0, 0.0};
+    bool effective_target_world_valid = false;
+    TargetCorrectionType source_type = TargetCorrectionType::PASS_THROUGH;
+};
+
 /// FIXED physical homotopy reference captured at macro entry.
 /// LEFT/RIGHT are interpreted ONLY relative to this axis and this
 /// blocker centre while the blocker is being passed: vehicle movement
@@ -958,6 +1212,86 @@ struct LocalBlockerEvidence {
     std::vector<Vec2d> visible_cells;
 };
 
+/// LOCAL blocker TRACK (v8) — the 5 Hz expert's long-term memory of the
+/// CURRENT blocking obstacle.  It is built ONLY from real observations
+/// (the current FOV patch + the merged local history map) and NEVER
+/// stores truth ids / truth circles.  Its geometry (centroid / bounding
+/// radius / outward normal / tangent directions) is estimated purely from
+/// the observed OCCUPIED boundary cells, so changing an unobserved part
+/// of the scene can never change the track.
+struct LocalBlockerTrack {
+    bool valid = false;
+    // Local track id: a monotonic counter owned by the 5 Hz expert.  It is
+    // NEVER a truth obstacle id.
+    int64_t track_id = -1;
+    uint64_t created_tick = 0;
+    // Last tick on which a NEW observation was associated with this track.
+    uint64_t last_observed_tick = 0;
+    // Macro-entry reference (fixed for the whole episode).
+    Vec2d hit_position{0.0, 0.0};
+    double hit_goal_distance = 0.0;
+    Vec2d entry_goal_axis{1.0, 0.0};  // FIXED unit axis: hit_position → goal
+    SideSelection locked_side = SideSelection::NONE;
+    // Accumulated observed OCCUPIED boundary cells (world coords).
+    std::vector<Vec2d> boundary_points;
+    Vec2d centroid{0.0, 0.0};
+    double bounding_radius = 0.0;
+    Vec2d nearest_boundary_point{0.0, 0.0};
+    double nearest_boundary_distance =
+        std::numeric_limits<double>::infinity();
+    // Local outward normal at the nearest boundary point (estimated from
+    // the observed points — never from a truth circle).
+    Vec2d outward_normal{0.0, 0.0};
+    // Tangent directions of travel for the two绕行 sides (unit vectors,
+    // estimated from the observed boundary, see MacroExpert5Hz):
+    //   tangent_left  = rot2(outward_normal, -90°)  (LEFT绕 / CW orbit)
+    //   tangent_right = rot2(outward_normal, +90°)  (RIGHT绕 / CCW orbit)
+    Vec2d tangent_left{0.0, 0.0};
+    Vec2d tangent_right{0.0, 0.0};
+    // Cumulative detour progress diagnostics (m), relative to the FIXED
+    // entry axis: monotonic forward projection and monotonic |lateral|.
+    double detour_along_progress_m = 0.0;
+    double detour_lateral_progress_m = 0.0;
+    // Diagnostics filled by the FSM / exit path every 5 Hz tick.
+    bool blocker_behind = false;
+    bool goal_corridor_clear = false;
+};
+
+/// Result of the local-causal guide generation (v8).  Carries the local
+/// known-free routes (published on the LEGACY left/right/locked topics —
+/// the content is now local, never privileged) and the hard-certification
+/// diagnostics of the delivered LocalTarget, plus body-frame supervision
+/// quantities for training / logging.
+struct LocalGuideResult {
+    LocalTarget target;
+    // Local candidate routes (compatibility topics only; NOT privileged).
+    Route2D left_route;     // best certified candidate on the LEFT side
+    Route2D right_route;    // best certified candidate on the RIGHT side
+    Route2D locked_route;   // [vehicle → chosen guide] local known-free route
+    // Guide arc / lookahead along the locked local route (m).
+    double lookahead_used = 0.0;
+    double route_progress = -1.0;
+    // Why the guide was (re)selected this 5 Hz tick: local_tangent_advance
+    // / local_frontier_advance / local_fov_edge_turn / local_hysteresis_hold
+    // / local_turning_hold / local_backward_jump_hold /
+    // local_shortened_lookahead / local_no_safe_guide_hold /
+    // local_no_safe_guide_stop / local_no_blocker_evidence.  Empty when
+    // the macro expert did not run.
+    std::string update_reason = "";
+    // Hard-certification diagnostics for the delivered guide.
+    bool guide_inside_current_fov = false;
+    bool guide_endpoint_known_free = false;
+    bool guide_chord_known_free = false;
+    double guide_min_observed_clearance =
+        std::numeric_limits<double>::infinity();
+    bool local_macro_route_valid = false;
+    // Body-frame supervision (body +X forward, +Y left) of the guide.
+    double relative_target_x_body = 0.0;
+    double relative_target_y_body = 0.0;
+    double target_bearing_rad = 0.0;
+    double target_distance_m = 0.0;
+};
+
 /// PRIVILEGED blocker — built from local evidence ASSOCIATED to truth
 /// cylinders via the Scene2D/global ESDF. center/radius are copied from
 /// the one dominant matched truth cylinder (never a merged multi-cylinder
@@ -971,22 +1305,35 @@ struct BlockerInfo {
     BlockerAssociation association = BlockerAssociation::NONE;
 };
 
-struct MacroExitCheck {
+/// Pure-local macro exit check (v8).  Every condition is computed from
+/// local observations + the local blocker track + the 30 Hz preview —
+/// never from the global ESDF, global route progress or truth geometry.
+struct LocalExitCheck {
+    // 1) The final goal re-entered the FOV with margin.
     bool goal_in_fov_margin = false;
-    // 30 Hz preview produced a SAFE AND PROGRESSING trajectory to the goal,
-    // or a safe final-goal TERMINAL_SETTLING trajectory.  A generic safe
-    // hold/stop away from the final-goal convergence region is not enough.
+    // 2) The 30 Hz preview (local_history_map) can independently produce a
+    //    SAFE AND PROGRESSING trajectory to the goal, or a safe
+    //    final-goal TERMINAL_SETTLING trajectory.
     bool local_precheck_ok = false;
-    // Diagnostic detail of the 30 Hz preview (v5).
+    // 3) The current local blocker no longer intersects the vehicle→goal
+    //    local corridor (pure observation).
+    bool blocker_not_in_corridor = false;
+    // 4) The blocker's observed boundary is mainly behind the vehicle.
+    bool blocker_behind = false;
+    // 5) Goal distance reduced by at least local_leave_goal_progress_m
+    //    relative to the macro-entry value.
+    bool goal_progress_made = false;
+    // 6) Not emergency braking / not recovering turn.
+    bool not_emergency_or_turn = false;
+    // Diagnostic detail of the 30 Hz preview.
     bool local_has_progressing_trajectory = false;
     double local_executable_progress_m = 0.0;
     double local_safe_prefix_duration_s = 0.0;
     double local_output_speed_mps = 0.0;
-    bool blocker_passed = false;
-    bool not_emergency_or_turn = false;
     bool all() const {
-        return goal_in_fov_margin && local_precheck_ok && blocker_passed &&
-               not_emergency_or_turn;
+        return goal_in_fov_margin && local_precheck_ok &&
+               blocker_not_in_corridor && blocker_behind &&
+               goal_progress_made && not_emergency_or_turn;
     }
 };
 

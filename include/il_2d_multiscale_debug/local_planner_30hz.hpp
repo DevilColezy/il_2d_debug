@@ -223,6 +223,10 @@ private:
     bool currentTrajectoryBlocked(const VehicleState2D& state,
                                   const LocalObservation& obs,
                                   bool& dynamic_violation) const;
+    /// Generate the symmetric rectangular velocity/yaw lattice plus a small
+    /// set of low-speed FOV-edge escape primitives. Escape primitives use
+    /// only configured FOV/kinematics and are subjected to exactly the same
+    /// local-observation safety evaluation as every other candidate.
     std::vector<LocalPlannerCandidate> generateCandidates(
         const VehicleState2D& state) const;
     /// The ONE shared output semantic: project an INTENT command through the

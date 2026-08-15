@@ -126,11 +126,70 @@ struct SimSnapshot {
     double macro_route_progress = -1.0;
     // Arc-length lookahead (m) used to select the guide.
     double macro_guide_lookahead = 0.0;
-    // Why the guide was (re)selected this 5 Hz tick.
+    // Why the guide was (re)selected this 5 Hz tick (v8: local reasons).
     std::string macro_guide_update_reason = "";
     // Continuous time (s) the vehicle has failed to translate in macro mode.
     double macro_no_progress_duration = 0.0;
-    // Macro A* start-clearance recovery was used on the locked route.
+    // ── Local-causal macro diagnostics (v8) ────────────────────────
+    // 5 Hz expert ran using ONLY local observations (always true).
+    bool macro_used_local_history_only = false;
+    // Hard-certification results of the current macro guide.
+    bool macro_guide_inside_current_fov = false;
+    bool macro_guide_endpoint_known_free = false;
+    bool macro_guide_chord_known_free = false;
+    // Min observed clearance along the guide chord (m, inf when not
+    // certified).
+    double macro_guide_min_observed_clearance =
+        std::numeric_limits<double>::infinity();
+    // Local blocker track state (id also published as blocker_id).
+    bool local_blocker_track_valid = false;
+    bool local_blocker_behind = false;
+    bool local_goal_corridor_clear = false;
+    // Goal-distance reduction (m) since macro entry.
+    double local_leave_progress_m = 0.0;
+    bool local_macro_route_valid = false;
+    // Body-frame supervision of the macro guide (training/logging).
+    double relative_target_x_body = 0.0;
+    double relative_target_y_body = 0.0;
+    double target_bearing_deg = 0.0;
+    double target_distance_m = 0.0;
+    // ── v9: 5 Hz visibility target corrector + target encoding ─────
+    // The directive type actually driving the 30 Hz expert this tick.
+    uint8_t target_correction_type = 0;  // TargetCorrectionType
+    std::string target_correction_type_name = "PASS_THROUGH";
+    bool target_correction_active = false;
+    // Student direction class (0=TURN_LEFT, 1..N ordinary, N+1=TURN_RIGHT,
+    // -1 for PASS_THROUGH).
+    int32_t target_direction_token = -1;
+    // Body-frame unit direction + normalized distance actually executed
+    // (the 30 Hz student labels; every real 30 Hz tick).
+    double target_direction_x_body = 1.0;
+    double target_direction_y_body = 0.0;
+    double target_distance_normalized = 0.0;
+    // Effective world target handed to the C++ 30 Hz expert.
+    double effective_target_x = 0.0;
+    double effective_target_y = 0.0;
+    bool effective_target_world_valid = false;
+    // The original final goal the 5 Hz corrector judged against.
+    Vec2d original_goal{0.0, 0.0};
+    // ── 5 Hz local observability diagnostics ───────────────────────
+    bool observability_goal_inside_fov = false;
+    bool observability_direct_corridor_blocked = false;
+    bool observability_blocker_observed = false;
+    bool observability_left_bypass_visible = false;
+    bool observability_right_bypass_visible = false;
+    bool observability_local_avoidance_observable = false;
+    bool observability_fov_boundary_truncated = false;
+    bool observability_unknown_occluded = false;
+    std::string observability_reason = "NONE";
+    double observability_left_score = 0.0;
+    double observability_right_score = 0.0;
+    // ── Correction events ──────────────────────────────────────────
+    uint64_t correction_enter_event = 0;
+    uint64_t correction_exit_event = 0;
+    uint64_t correction_update_event = 0;
+    // Macro A* start-clearance recovery was used on the locked route
+    // (v8: always false — no global A*).
     bool start_clearance_recovery_used = false;
     // LOCAL_UNKNOWN_RECOVERY diagnostic (UNKNOWN-driven, never macro).
     uint32_t unknown_recovery_ticks = 0;

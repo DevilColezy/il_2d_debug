@@ -43,14 +43,19 @@ string side_reason          # VISIBLE_LEFT_BETTER / VISIBLE_RIGHT_BETTER / AMBIG
 # ── Blocker / macro progress (audit) ─────────────────────────────
 uint8  blocker_association  # 0 NONE, 1 MATCHED, 2 NO_MATCH, 3 AMBIGUOUS_MATCH
 string blocker_association_name
-bool   blocker_passed_latched   # latched once the fixed-route progress passes
-bool   start_clearance_recovery_used  # macro A* start recovery prefix used
-float64 entry_vehicle_progress  # monotonic arc length along fixed entry route
-float64 entry_blocker_progress  # fixed blocker arc length on the entry route
-float64 entry_projection_dist   # last lateral projection distance to the route
-int32   entry_segment_index     # last matched segment on the fixed entry route
-float64 entry_progress_delta    # accepted progress increase on this macro tick
-float64 entry_progress_max_delta # configured physical upper bound per macro tick
+# v8: the 5 Hz expert never performs privileged truth association, so
+# blocker_association is ALWAYS NONE.  blocker_id now carries the LOCAL
+# blocker TRACK id (a monotonic 5 Hz counter, never a truth obstacle id).
+bool   blocker_passed_latched   # v8: latched once the PURE-LOCAL exit conditions first hold (diagnostic)
+bool   start_clearance_recovery_used  # v8: always false (no global A*)
+# v8 DEPRECATED (always -1/0): the macro no longer tracks a fixed global
+# reference route for the blocker-passed check.
+float64 entry_vehicle_progress  # deprecated (local mode: -1)
+float64 entry_blocker_progress  # deprecated (local mode: -1)
+float64 entry_projection_dist   # deprecated (local mode: -1)
+int32   entry_segment_index     # deprecated (local mode: -1)
+float64 entry_progress_delta    # deprecated (local mode: 0)
+float64 entry_progress_max_delta # deprecated (local mode: 0)
 
 # ── 30 Hz planner ─────────────────────────────────────────────────
 bool   planner_success
@@ -132,7 +137,10 @@ bool   task_invalid
 bool used_truth_by_local_planner     # [AUDIT] always false by construction
 bool used_global_esdf_by_local_planner  # [AUDIT] always false by construction
 bool used_global_path_by_local_planner  # [AUDIT] always false by construction
+# v8: always false — the 5 Hz expert is a pure local observer.
 bool macro_used_privileged_esdf      # [AUDIT]
+# v8: true whenever the 5 Hz expert ran using ONLY local observations.
+bool macro_used_local_history_only   # [AUDIT]
 bool side_selected_from_visible_evidence  # [AUDIT]
 bool side_ambiguous_defaulted_right  # [AUDIT]
 bool side_selected_using_current_patch   # [AUDIT] side evidence used current_patch
@@ -189,7 +197,68 @@ bool   avoidance_active               # avoidance_strength >= threshold
 float64 local_target_distance         # distance to current LocalTarget (m)
 
 # ── Rolling macro guide diagnostics (v7) ──────────────────────────
-float64 macro_route_progress          # guide arc along current locked route (m)
-float64 macro_guide_lookahead         # arc lookahead used (m)
-string  macro_guide_update_reason     # why the guide was re-selected
+# v8: these carry the LOCAL guide diagnostics (guide distance along the
+# locked local route / local lookahead / local update reason).
+float64 macro_route_progress          # guide distance along locked local route (m)
+float64 macro_guide_lookahead         # local lookahead used (m)
+string  macro_guide_update_reason     # local reason: local_tangent_advance /
+                                      #   local_frontier_advance / local_fov_edge_turn /
+                                      #   local_hysteresis_hold / local_turning_hold /
+                                      #   local_backward_jump_hold /
+                                      #   local_shortened_lookahead /
+                                      #   local_no_safe_guide_hold / local_no_safe_guide_stop
 float64 macro_no_progress_duration    # continuous no-translation time in macro (s)
+
+# ── v9: 5 Hz visibility target corrector + target encoding ────────
+# v9 起 5Hz 专家是“局部可观测性判断器 + 目标修正器”（PASS_THROUGH /
+# NORMAL_CORRECTION / TURN_LEFT / TURN_RIGHT），不再规划宏观绕行。
+# EffectiveTargetAdapter 每个真实 30Hz tick 把零阶保持的 directive 转换
+# 成 C++ 30Hz 专家的 LocalTarget 世界点 AND 未来 30Hz 学生的机体系单位
+# 方向 + 归一化距离。
+uint8   target_correction_type        # TargetCorrectionType (types.hpp)
+string  target_correction_type_name
+bool    target_correction_active      # a 5 Hz correction episode is active
+int32   target_direction_token        # 0=TURN_LEFT, 1..N ordinary LEFT->RIGHT, N+1=TURN_RIGHT, -1=PASS
+float64 target_direction_x_body       # executed body-frame unit direction X
+float64 target_direction_y_body       # executed body-frame unit direction Y
+float64 target_distance_normalized    # executed normalized distance (0..1)
+float64 effective_target_x            # world target actually given to 30 Hz (m)
+float64 effective_target_y
+bool    effective_target_world_valid
+float64[2] original_goal              # original final goal the 5 Hz judged
+
+# ── v9: 5 Hz local observability diagnostics ──────────────────────
+bool    observability_goal_inside_fov        # goal direction inside FOV
+bool    observability_direct_corridor_blocked # OCCUPIED blocks vehicle→goal corridor
+bool    observability_blocker_observed       # real observed blocker exists
+bool    observability_left_bypass_visible    # LEFT local bypass exit clearly visible
+bool    observability_right_bypass_visible   # RIGHT local bypass exit clearly visible
+bool    observability_local_avoidance_observable  # 30Hz can self-avoid (PASS_THROUGH)
+bool    observability_fov_boundary_truncated # exit cut off by FOV boundary
+bool    observability_unknown_occluded       # view occluded by UNKNOWN
+string  observability_reason                 # WHY the 5 Hz thinks FOV is (un)observable
+float64 observability_left_score             # farthest certified LEFT frontier (m)
+float64 observability_right_score            # farthest certified RIGHT frontier (m)
+
+# ── v9: correction events (never mission_revision) ─────────────────
+uint64  correction_enter_event        # 5 Hz entered a correction episode
+uint64  correction_exit_event         # 5 Hz released the correction (PASS_THROUGH)
+uint64  correction_update_event       # directive value refreshed inside correction
+
+# ── Local-causal 5 Hz macro expert diagnostics (v8) ───────────────
+# v8 起 5Hz 宏观专家为纯局部观测者（current_patch + local_history_map +
+# 车辆状态 + 最终目标 + 自身记忆），以下字段记录其硬认证与局部跟踪结果。
+# （macro_used_local_history_only 在 AUDIT 区发布，恒为 true。）
+bool    macro_guide_inside_current_fov   # guide passed current-patch FOV certification
+bool    macro_guide_endpoint_known_free  # guide endpoint known-FREE in current patch
+bool    macro_guide_chord_known_free     # whole chord known-FREE in current patch
+float64 macro_guide_min_observed_clearance # min observed clearance along guide chord (m, inf if not certified)
+bool    local_blocker_track_valid     # local blocker track is live
+bool    local_blocker_behind          # tracked boundary mainly behind the vehicle
+bool    local_goal_corridor_clear     # tracked blocker no longer intersects vehicle→goal corridor
+float64 local_leave_progress_m        # goal-distance reduction since macro entry (m)
+bool    local_macro_route_valid       # locked local known-free route valid
+float64 relative_target_x_body        # macro guide body-frame supervision (m, +X forward)
+float64 relative_target_y_body        # macro guide body-frame supervision (m, +Y left)
+float64 target_bearing_deg            # macro guide bearing rel. vehicle yaw (deg)
+float64 target_distance_m             # macro guide distance (m)

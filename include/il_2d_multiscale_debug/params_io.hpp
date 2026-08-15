@@ -8,6 +8,7 @@
 #include <ros/ros.h>
 #include <XmlRpcValue.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 #include <exception>
@@ -230,7 +231,6 @@ inline Params2D loadParams(const ros::NodeHandle& pnh) {
     pnh.param("macro/blocker_match_min_cells", p.macro_blocker_match_min_cells, p.macro_blocker_match_min_cells);
     pnh.param("macro/blocker_match_ambiguity_ratio", p.macro_blocker_match_ambiguity_ratio, p.macro_blocker_match_ambiguity_ratio);
     pnh.param("macro/blocker_match_surface_tol_m", p.macro_blocker_match_surface_tol_m, p.macro_blocker_match_surface_tol_m);
-    pnh.param("macro/macro_exit_stable_ticks", p.macro_exit_stable_ticks, p.macro_exit_stable_ticks);
     pnh.param("macro/macro_reentry_guard_ticks", p.macro_reentry_guard_ticks, p.macro_reentry_guard_ticks);
     pnh.param("macro/route_clearance_margin", p.macro_route_clearance_margin, p.macro_route_clearance_margin);
     pnh.param("macro/start_recovery_max_radius_m", p.macro_start_recovery_max_radius_m, p.macro_start_recovery_max_radius_m);
@@ -238,6 +238,40 @@ inline Params2D loadParams(const ros::NodeHandle& pnh) {
     pnh.param("macro/route_side_bias", p.macro_route_side_bias, p.macro_route_side_bias);
     pnh.param("macro/homotopy_side_tolerance_m", p.macro_homotopy_side_tolerance_m, p.macro_homotopy_side_tolerance_m);
     pnh.param("macro/gateway_projection_radius_m", p.macro_gateway_projection_radius_m, p.macro_gateway_projection_radius_m);
+
+    // ── v8: local-causal 5 Hz macro expert params ─────────────────
+    pnh.param("macro/local_leave_goal_progress_m", p.macro_local_leave_goal_progress_m, p.macro_local_leave_goal_progress_m);
+    pnh.param("macro/local_blocker_behind_margin_m", p.macro_local_blocker_behind_margin_m, p.macro_local_blocker_behind_margin_m);
+    pnh.param("macro/local_blocker_behind_fraction", p.macro_local_blocker_behind_fraction, p.macro_local_blocker_behind_fraction);
+    pnh.param("macro/local_track_timeout_s", p.macro_local_track_timeout_s, p.macro_local_track_timeout_s);
+    pnh.param("macro/local_frontier_min_distance_m", p.macro_local_frontier_min_distance_m, p.macro_local_frontier_min_distance_m);
+    pnh.param("macro/local_frontier_max_distance_m", p.macro_local_frontier_max_distance_m, p.macro_local_frontier_max_distance_m);
+    pnh.param("macro/local_candidate_bearing_step_deg", p.macro_local_candidate_bearing_step_deg, p.macro_local_candidate_bearing_step_deg);
+    pnh.param("macro/local_candidate_distance_step_m", p.macro_local_candidate_distance_step_m, p.macro_local_candidate_distance_step_m);
+    pnh.param("macro/local_clearance_search_radius_m", p.macro_local_clearance_search_radius_m, p.macro_local_clearance_search_radius_m);
+    pnh.param("macro/local_track_max_points", p.macro_local_track_max_points, p.macro_local_track_max_points);
+    pnh.param("macro/local_track_assoc_radius_m", p.macro_local_track_assoc_radius_m, p.macro_local_track_assoc_radius_m);
+    pnh.param("macro/local_recovery_prefix_m", p.macro_local_recovery_prefix_m, p.macro_local_recovery_prefix_m);
+
+    // ── v9: 5 Hz visibility target corrector + target-encoding params ──
+    if (!std::isfinite(p.obs_range_m) || p.obs_range_m <= 0.0) {
+        ROS_WARN_STREAM("observation/range_m must be finite and > 0; "
+                        "using 6.0");
+        p.obs_range_m = 6.0;
+    }
+    if (!std::isfinite(p.obs_fov_deg) || p.obs_fov_deg <= 0.0 ||
+        p.obs_fov_deg >= 180.0) {
+        ROS_WARN_STREAM("observation/fov_deg must be finite and in "
+                        "(0, 180); using 90.0");
+        p.obs_fov_deg = 90.0;
+    }
+    pnh.param("target_encoding/direction_bin_count", p.te_direction_bin_count, p.te_direction_bin_count);
+    pnh.param("target_encoding/normal_distance_reserve_m", p.te_normal_distance_reserve_m, p.te_normal_distance_reserve_m);
+    pnh.param("target_encoding/turn_ray_margin_deg", p.te_turn_ray_margin_deg, p.te_turn_ray_margin_deg);
+    pnh.param("macro/correction_enter_stable_ticks", p.macro_correction_enter_stable_ticks, p.macro_correction_enter_stable_ticks);
+    pnh.param("macro/observable_frontier_min_distance_m", p.macro_observable_frontier_min_distance_m, p.macro_observable_frontier_min_distance_m);
+    pnh.param("macro/observable_frontier_min_progress_m", p.macro_observable_frontier_min_progress_m, p.macro_observable_frontier_min_progress_m);
+    pnh.param("macro/observable_unknown_margin_cells", p.macro_observable_unknown_margin_cells, p.macro_observable_unknown_margin_cells);
 
     pnh.param("vehicle/goal_stop_speed_mps", p.vehicle_goal_stop_speed_mps, p.vehicle_goal_stop_speed_mps);
     pnh.param("vehicle/stationary_speed_mps", p.vehicle_stationary_speed_mps, p.vehicle_stationary_speed_mps);
@@ -398,11 +432,11 @@ inline Params2D loadParams(const ros::NodeHandle& pnh) {
     nonnegativeWeight(p.cost_w_yaw_rate_change,
                       "local_planner/cost_weights/yaw_rate_change", 0.3);
     nonnegativeWeight(p.cost_w_terminal_heading,
-                      "local_planner/cost_weights/terminal_heading", 1.5);
+                      "local_planner/cost_weights/terminal_heading", 1.0);
     nonnegativeWeight(p.cost_w_velocity_alignment,
                       "local_planner/cost_weights/velocity_alignment", 1.2);
     nonnegativeWeight(p.cost_w_cross_track,
-                      "local_planner/cost_weights/cross_track", 1.0);
+                      "local_planner/cost_weights/cross_track", 0.8);
     nonnegativeWeight(p.cost_w_obstacle_risk,
                       "local_planner/cost_weights/obstacle_risk", 3.0);
 
@@ -571,6 +605,140 @@ inline Params2D loadParams(const ros::NodeHandle& pnh) {
         ROS_WARN_STREAM("logging/filename_prefix must be a non-empty filename "
                         "prefix without path separators; using flight_log_");
         p.logging_filename_prefix = "flight_log_";
+    }
+
+    // ── v8: local-causal 5 Hz macro expert param validation ────────
+    // All local parameters are pure geometry / timing quantities with
+    // finiteness + range checks; bad YAML never silently corrupts the
+    // local guidance pipeline.
+    if (!std::isfinite(p.macro_local_leave_goal_progress_m) ||
+        p.macro_local_leave_goal_progress_m < 0.0) {
+        ROS_WARN_STREAM("macro/local_leave_goal_progress_m must be finite "
+                        "and >= 0; using 1.5");
+        p.macro_local_leave_goal_progress_m = 1.5;
+    }
+    if (!std::isfinite(p.macro_local_blocker_behind_margin_m) ||
+        p.macro_local_blocker_behind_margin_m < 0.0) {
+        ROS_WARN_STREAM("macro/local_blocker_behind_margin_m must be finite "
+                        "and >= 0; using 0.5");
+        p.macro_local_blocker_behind_margin_m = 0.5;
+    }
+    if (!std::isfinite(p.macro_local_blocker_behind_fraction) ||
+        p.macro_local_blocker_behind_fraction <= 0.0 ||
+        p.macro_local_blocker_behind_fraction > 1.0) {
+        ROS_WARN_STREAM("macro/local_blocker_behind_fraction must be finite "
+                        "and in (0,1]; using 0.6");
+        p.macro_local_blocker_behind_fraction = 0.6;
+    }
+    if (!std::isfinite(p.macro_local_track_timeout_s) ||
+        p.macro_local_track_timeout_s <= 0.0) {
+        ROS_WARN_STREAM("macro/local_track_timeout_s must be finite and "
+                        "> 0; using 3.0");
+        p.macro_local_track_timeout_s = 3.0;
+    }
+    if (!std::isfinite(p.macro_local_frontier_min_distance_m) ||
+        p.macro_local_frontier_min_distance_m <= 0.0) {
+        ROS_WARN_STREAM("macro/local_frontier_min_distance_m must be finite "
+                        "and > 0; using 1.5");
+        p.macro_local_frontier_min_distance_m = 1.5;
+    }
+    if (!std::isfinite(p.macro_local_frontier_max_distance_m) ||
+        p.macro_local_frontier_max_distance_m <
+            std::max(p.macro_local_frontier_min_distance_m,
+                     p.macro_guide_min_distance_m)) {
+        ROS_WARN_STREAM("macro/local_frontier_max_distance_m must be finite "
+                        "and >= max(local_frontier_min_distance_m, "
+                        "guide_min_distance_m); using "
+                        << std::max({4.0,
+                                     p.macro_local_frontier_min_distance_m,
+                                     p.macro_guide_min_distance_m}));
+        p.macro_local_frontier_max_distance_m =
+            std::max({4.0, p.macro_local_frontier_min_distance_m,
+                      p.macro_guide_min_distance_m});
+    }
+    if (!std::isfinite(p.macro_local_candidate_bearing_step_deg) ||
+        p.macro_local_candidate_bearing_step_deg <= 0.0 ||
+        p.macro_local_candidate_bearing_step_deg > 90.0) {
+        ROS_WARN_STREAM("macro/local_candidate_bearing_step_deg must be "
+                        "finite and in (0,90]; using 5.0");
+        p.macro_local_candidate_bearing_step_deg = 5.0;
+    }
+    if (!std::isfinite(p.macro_local_candidate_distance_step_m) ||
+        p.macro_local_candidate_distance_step_m <= 0.0) {
+        ROS_WARN_STREAM("macro/local_candidate_distance_step_m must be "
+                        "finite and > 0; using 0.5");
+        p.macro_local_candidate_distance_step_m = 0.5;
+    }
+    if (!std::isfinite(p.macro_local_clearance_search_radius_m) ||
+        p.macro_local_clearance_search_radius_m <= 0.0) {
+        ROS_WARN_STREAM("macro/local_clearance_search_radius_m must be "
+                        "finite and > 0; using 3.0");
+        p.macro_local_clearance_search_radius_m = 3.0;
+    }
+    if (p.macro_local_track_max_points < 10) {
+        ROS_WARN_STREAM("macro/local_track_max_points must be >= 10; "
+                        "clamping to 2000");
+        p.macro_local_track_max_points = 2000;
+    }
+    if (!std::isfinite(p.macro_local_track_assoc_radius_m) ||
+        p.macro_local_track_assoc_radius_m <= 0.0) {
+        ROS_WARN_STREAM("macro/local_track_assoc_radius_m must be finite "
+                        "and > 0; using 2.0");
+        p.macro_local_track_assoc_radius_m = 2.0;
+    }
+    if (!std::isfinite(p.macro_local_recovery_prefix_m) ||
+        p.macro_local_recovery_prefix_m < 0.0) {
+        ROS_WARN_STREAM("macro/local_recovery_prefix_m must be finite "
+                        "and >= 0; using 0.8");
+        p.macro_local_recovery_prefix_m = 0.8;
+    }
+
+    // ── v9: 5 Hz visibility target corrector + target-encoding params ──
+    // direction_bin_count must be ODD and >= 3 so the ordinary bins are
+    // symmetric and include the 0° direction exactly.
+    if (p.te_direction_bin_count < 3 || p.te_direction_bin_count % 2 == 0) {
+        ROS_WARN_STREAM("target_encoding/direction_bin_count must be odd "
+                        "and >= 3; using 11");
+        p.te_direction_bin_count = 11;
+    }
+    if (!std::isfinite(p.te_normal_distance_reserve_m) ||
+        p.te_normal_distance_reserve_m < 1e-6 * p.obs_range_m ||
+        p.te_normal_distance_reserve_m >= p.obs_range_m) {
+        ROS_WARN_STREAM("target_encoding/normal_distance_reserve_m must be "
+                        "finite, numerically separated from zero, and less "
+                        "than observation/range_m; using a range-safe "
+                        "default");
+        p.te_normal_distance_reserve_m =
+            std::min(0.5, 0.1 * p.obs_range_m);
+    }
+    if (!std::isfinite(p.te_turn_ray_margin_deg) ||
+        p.te_turn_ray_margin_deg <= 0.0 ||
+        p.te_turn_ray_margin_deg >= p.obs_fov_deg / 2.0) {
+        ROS_WARN_STREAM("target_encoding/turn_ray_margin_deg must be finite "
+                        "and in (0, fov_deg/2); using a FOV-safe default");
+        p.te_turn_ray_margin_deg = 0.1 * p.obs_fov_deg;
+    }
+    if (p.macro_correction_enter_stable_ticks < 1) {
+        ROS_WARN_STREAM("macro/correction_enter_stable_ticks must be >= 1; "
+                        "clamping to 1");
+        p.macro_correction_enter_stable_ticks = 1;
+    }
+    if (!std::isfinite(p.macro_observable_frontier_min_distance_m) ||
+        p.macro_observable_frontier_min_distance_m <= 0.0) {
+        ROS_WARN_STREAM("macro/observable_frontier_min_distance_m must be "
+                        "finite and > 0; using 1.5");
+        p.macro_observable_frontier_min_distance_m = 1.5;
+    }
+    if (!std::isfinite(p.macro_observable_frontier_min_progress_m) ||
+        p.macro_observable_frontier_min_progress_m < 0.0) {
+        ROS_WARN_STREAM("macro/observable_frontier_min_progress_m must be "
+                        "finite and >= 0; using 0.5");
+        p.macro_observable_frontier_min_progress_m = 0.5;
+    }
+    if (p.macro_observable_unknown_margin_cells < 1) {
+        ROS_WARN_STREAM("macro/observable_unknown_margin_cells must be "
+                        ">= 1; clamping to 3");
+        p.macro_observable_unknown_margin_cells = 3;
     }
     return p;
 }

@@ -71,6 +71,7 @@ set(CORE_SOURCES
   src/observed_grid_2d.cpp
   src/local_planner_30hz.cpp
   src/left_right_route_planner.cpp
+  src/effective_target_adapter.cpp
   src/macro_expert_5hz.cpp
   src/hierarchical_expert_fsm.cpp
   src/planar_vehicle_simulator.cpp
